@@ -362,7 +362,7 @@ jobs:
           test ! -e package/feeds/luci/luci-app-uugamebooster
 
 
-      - name: Add QuickStart feeds and Argon UI
+      - name: Add QuickStart and DoorNet2 UI themes
         run: |
           set -e
 
@@ -388,14 +388,23 @@ jobs:
             -p nas_luci \
             luci-app-quickstart
 
-          echo "===== ADD ARGON THEME ====="
+          echo "===== ADD DESIGN THEME (DEFAULT) ====="
 
           mkdir -p package/lean
 
           rm -rf \
+            package/lean/luci-theme-design \
             package/lean/luci-theme-argon \
             package/lean/luci-app-argon-config
 
+          # Design main is the Lua/LEDE branch and matches this DoorNet2 tree.
+          git clone \
+            --depth 1 \
+            --branch main \
+            https://github.com/0x676e67/luci-theme-design.git \
+            package/lean/luci-theme-design
+
+          # Keep Argon as a recovery/fallback theme only.
           git clone \
             --depth 1 \
             https://github.com/jerrykuku/luci-theme-argon.git \
@@ -406,10 +415,15 @@ jobs:
             https://github.com/jerrykuku/luci-app-argon-config.git \
             package/lean/luci-app-argon-config
 
-          echo "===== QUICKSTART / ARGON SOURCES ====="
+          echo "===== VERIFY QUICKSTART / DESIGN / RECOVERY THEMES ====="
 
           test -f feeds/nas/network/services/quickstart/Makefile
           test -f feeds/nas_luci/luci/luci-app-quickstart/Makefile
+
+          test -f package/lean/luci-theme-design/Makefile
+          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          test -f package/lean/luci-theme-design/htdocs/luci-static/design/css/style.css
+
           test -f package/lean/luci-theme-argon/Makefile
           test -f package/lean/luci-app-argon-config/Makefile
 
@@ -422,31 +436,63 @@ jobs:
             'LUCI_TITLE|LUCI_DEPENDS|PKG_VERSION' \
             feeds/nas_luci/luci/luci-app-quickstart/Makefile
 
+          echo "===== PATCH DESIGN HOME SHORTCUT TO QUICKSTART ====="
+
+          DESIGN_HEADER="package/lean/luci-theme-design/luasrc/view/themes/design/header.htm"
+
+          sed -i \
+            's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
+            "$DESIGN_HEADER"
+
+          grep -n '/cgi-bin/luci/admin/quickstart/' "$DESIGN_HEADER"
+
 
       - name: Configure DoorNet2 UI defaults
         run: |
           set -e
 
-          mkdir -p files/etc/uci-defaults
+          mkdir -p \
+            files/etc/uci-defaults \
+            files/etc/config
 
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R32 UI defaults
-          # Keep Bootstrap installed as a recovery theme, but use Argon by default.
+          # DoorNet2 R33 UI policy:
+          # Design default + QuickStart home, with Argon/Bootstrap recovery.
 
-          if uci -q get luci.main >/dev/null 2>&1; then
-              uci -q set luci.main.mediaurlbase='/luci-static/argon'
-              uci -q set luci.main.lang='zh_cn'
-              uci -q commit luci
+          uci -q set luci.themes.Design='/luci-static/design'
+          uci -q set luci.themes.Argon='/luci-static/argon'
+          uci -q set luci.main.mediaurlbase='/luci-static/design'
+          uci -q set luci.main.lang='zh_cn'
+          uci -q commit luci
+
+          if [ "$(uci -q get system.@system[0].hostname)" = "OpenWrt" ]; then
+              uci -q set system.@system[0].hostname='DoorNet2'
+              uci -q commit system
           fi
+
+          rm -rf \
+            /tmp/luci-indexcache \
+            /tmp/luci-modulecache \
+            /tmp/luci-templatecache
 
           exit 0
           EOF
 
           chmod 755 files/etc/uci-defaults/95-doornet2-ui
+          sh -n files/etc/uci-defaults/95-doornet2-ui
 
+          cat > files/etc/config/design <<'EOF'
+          config global
+                  option mode 'dark'
+                  option navbar 'display'
+                  option navbar_proxy 'passwall'
+          EOF
+
+          echo "===== R33 UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
+          cat files/etc/config/design
 
 
       - name: Configure DNS and accelerator safe defaults
@@ -478,380 +524,38 @@ jobs:
           sh -n files/etc/uci-defaults/97-doornet2-network-apps
 
 
-      - name: Add DoorNet2 iStoreOS dark visual layer
+      # ============================================================
+      # 4. R33 UI strategy
+      #
+      # Use the native Design theme for the whole shell.
+      # No global Argon "fake iStoreOS" stylesheet is injected.
+      # ============================================================
+
+      - name: Verify DoorNet2 Design UI source
         run: |
           set -e
 
-          echo "===== ADD DOORNET2 ISTOREOS DARK VISUAL ====="
+          echo "===== VERIFY R33 DESIGN UI SOURCE ====="
 
-          mkdir -p files/www/luci-static/doornet2
-          mkdir -p files/etc/uci-defaults
+          test -f package/lean/luci-theme-design/Makefile
+          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          test -f package/lean/luci-theme-design/htdocs/luci-static/design/css/style.css
 
-          cat > files/www/luci-static/doornet2/istoreos-dark.css <<'EOF'
-          /*
-           * DoorNet2 iStoreOS-inspired dark visual layer
-           * Visual-only override. No boot/storage/network logic is changed.
-           */
+          grep -q \
+            '/cgi-bin/luci/admin/quickstart/' \
+            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
 
-          :root {
-            --dn-bg: #1f1f1f;
-            --dn-sidebar: #303030;
-            --dn-sidebar-hover: #3a3a3a;
-            --dn-card: #2a2a2a;
-            --dn-card-2: #2f2f2f;
-            --dn-border: #3a3a3a;
-            --dn-text: #f3f4f6;
-            --dn-muted: #a7adb7;
-            --dn-accent: #6574e8;
-            --dn-accent-2: #7b61ff;
-            --dn-green: #62d394;
-            --dn-shadow: 0 1px 2px rgba(0,0,0,.22);
-          }
+          test -f files/etc/config/design
+          grep -q "option mode 'dark'" files/etc/config/design
+          grep -q "option navbar_proxy 'passwall'" files/etc/config/design
 
-          html,
-          body {
-            background: var(--dn-bg) !important;
-            color: var(--dn-text) !important;
-          }
+          test -x files/etc/uci-defaults/95-doornet2-ui
+          grep -q "mediaurlbase='/luci-static/design'" \
+            files/etc/uci-defaults/95-doornet2-ui
 
-          body,
-          button,
-          input,
-          select,
-          textarea {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif !important;
-          }
-
-          /* ---------- Argon shell ---------- */
-          .main,
-          .main-right,
-          #maincontent,
-          #maincontent > .container {
-            background: var(--dn-bg) !important;
-          }
-
-          #maincontent > .container,
-          .main-right > #maincontent > .container {
-            max-width: none !important;
-            width: 100% !important;
-            box-sizing: border-box !important;
-          }
-
-          .main-left,
-          #mainmenu {
-            background: var(--dn-sidebar) !important;
-            box-shadow: none !important;
-            border-right: 1px solid #393939 !important;
-          }
-
-          .sidenav-header {
-            background: var(--dn-sidebar) !important;
-            border-bottom: 1px solid rgba(255,255,255,.04) !important;
-          }
-
-          .main-left .brand,
-          header .brand {
-            color: #fff !important;
-            font-weight: 700 !important;
-            letter-spacing: -.3px !important;
-            text-shadow: none !important;
-          }
-
-          .main-left .brand::before,
-          header .brand::before {
-            content: "◈";
-            display: inline-block;
-            margin-right: 7px;
-            color: #fff;
-            font-size: .92em;
-          }
-
-          .main-right > header,
-          header.bg-primary,
-          header .fill {
-            background: var(--dn-bg) !important;
-            background-image: none !important;
-            box-shadow: none !important;
-            border-bottom: 1px solid #2a2a2a !important;
-          }
-
-          .main-right > header .container {
-            max-width: none !important;
-            width: 100% !important;
-          }
-
-          .main-left .nav > li > a,
-          .main-left .nav > li > ul > li > a,
-          .main-left .nav a,
-          #mainmenu a {
-            color: #c9cdd4 !important;
-            border-radius: 7px !important;
-            transition: background .15s ease, color .15s ease !important;
-          }
-
-          .main-left .nav > li > a:hover,
-          .main-left .nav > li > ul > li > a:hover,
-          #mainmenu a:hover {
-            color: #fff !important;
-            background: var(--dn-sidebar-hover) !important;
-          }
-
-          .main-left .nav li.active > a,
-          .main-left .nav li.slide.active > a,
-          #mainmenu li.active > a {
-            color: #fff !important;
-            background: var(--dn-accent) !important;
-            box-shadow: none !important;
-          }
-
-          .main-left .nav li.active > a::before,
-          .main-left .nav li.slide.active > a::before {
-            background: transparent !important;
-          }
-
-          .main-left .nav .menu-item-arrow,
-          .main-left .nav .icon {
-            color: inherit !important;
-          }
-
-          .darkMask {
-            display: none !important;
-          }
-
-          /* ---------- Generic LuCI cards/forms ---------- */
-          .cbi-map,
-          .cbi-section,
-          .cbi-section-node,
-          .panel,
-          .card,
-          .modal,
-          .alert-message,
-          .table,
-          .table-titles,
-          .table-row {
-            border-color: var(--dn-border) !important;
-          }
-
-          .cbi-section,
-          .cbi-section-node,
-          .panel,
-          .card,
-          .modal {
-            background: var(--dn-card) !important;
-            color: var(--dn-text) !important;
-            box-shadow: var(--dn-shadow) !important;
-          }
-
-          h1, h2, h3, h4, h5, h6,
-          .cbi-section-title,
-          .cbi-map-descr,
-          label,
-          legend,
-          .control-label {
-            color: var(--dn-text) !important;
-          }
-
-          small,
-          .help-block,
-          .cbi-value-description,
-          .text-muted {
-            color: var(--dn-muted) !important;
-          }
-
-          input,
-          select,
-          textarea,
-          .cbi-input-text,
-          .cbi-input-select {
-            background: #242424 !important;
-            color: var(--dn-text) !important;
-            border-color: #454545 !important;
-          }
-
-          /* ---------- QuickStart dashboard ---------- */
-          body[data-page*="quickstart"] #maincontent,
-          body[data-page*="quickstart"] #maincontent > .container,
-          body[data-page*="quickstart"] .main-right {
-            background: var(--dn-bg) !important;
-          }
-
-          body[data-page*="quickstart"] #maincontent > .container {
-            padding: 12px 14px 22px !important;
-          }
-
-          body[data-page*="quickstart"] [class*="card"],
-          body[data-page*="quickstart"] [class*="panel"],
-          body[data-page*="quickstart"] [class*="module"],
-          body[data-page*="quickstart"] [class*="widget"],
-          body[data-page*="quickstart"] [class*="block"],
-          body[data-page*="quickstart"] section {
-            border-color: var(--dn-border) !important;
-            box-shadow: var(--dn-shadow) !important;
-          }
-
-          body[data-page*="quickstart"] [style*="background: rgb(255"],
-          body[data-page*="quickstart"] [style*="background-color: rgb(255"],
-          body[data-page*="quickstart"] [style*="background:#fff"],
-          body[data-page*="quickstart"] [style*="background: #fff"] {
-            background: var(--dn-card) !important;
-          }
-
-          body[data-page*="quickstart"] .ant-card,
-          body[data-page*="quickstart"] .ant-card-bordered,
-          body[data-page*="quickstart"] .ant-table,
-          body[data-page*="quickstart"] .ant-modal-content,
-          body[data-page*="quickstart"] .ant-drawer-content,
-          body[data-page*="quickstart"] .el-card,
-          body[data-page*="quickstart"] .q-card {
-            background: var(--dn-card) !important;
-            border-color: var(--dn-border) !important;
-            color: var(--dn-text) !important;
-          }
-
-          body[data-page*="quickstart"] .ant-card-head,
-          body[data-page*="quickstart"] .ant-card-body,
-          body[data-page*="quickstart"] .ant-table-thead > tr > th,
-          body[data-page*="quickstart"] .ant-table-tbody > tr > td {
-            background: transparent !important;
-            border-color: var(--dn-border) !important;
-            color: var(--dn-text) !important;
-          }
-
-          body[data-page*="quickstart"] .ant-typography,
-          body[data-page*="quickstart"] .ant-card,
-          body[data-page*="quickstart"] .ant-card *:not(svg):not(path),
-          body[data-page*="quickstart"] .el-card,
-          body[data-page*="quickstart"] .el-card *:not(svg):not(path) {
-            color: inherit;
-          }
-
-          body[data-page*="quickstart"] canvas {
-            border-radius: 8px !important;
-          }
-
-          body[data-page*="quickstart"] a {
-            color: #7ba7ff;
-          }
-
-          body[data-page*="quickstart"] button,
-          body[data-page*="quickstart"] .btn,
-          body[data-page*="quickstart"] .ant-btn {
-            border-radius: 7px !important;
-          }
-
-          /* Match the compact iStoreOS desktop composition. */
-          @media (min-width: 1200px) {
-            .main-left,
-            #mainmenu {
-              width: 164px !important;
-            }
-
-            .main-right {
-              margin-left: 164px !important;
-              width: calc(100% - 164px) !important;
-            }
-          }
-          EOF
-
-          # Load the DoorNet2 visual override after Argon's own stylesheet and
-          # brand the UI as DoorNet2. We intentionally do not label this firmware
-          # as official iStoreOS; only the visual language is iStoreOS-inspired.
-          python3 - <<'PY2'
-          from pathlib import Path
-
-          roots = [
-              Path('package/lean/luci-theme-argon/ucode/template/themes/argon'),
-              Path('package/lean/luci-theme-argon/luasrc/view/themes/argon'),
-          ]
-
-          patched_link = 0
-          patched_brand = 0
-
-          for root in roots:
-              if not root.exists():
-                  continue
-              for p in root.glob('header.*'):
-                  text = p.read_text(errors='ignore')
-                  old = text
-
-                  # Modern ucode template.
-                  needle = '<link rel="stylesheet" href="{{ media }}/css/cascade.css{# ?v=PKG_VERSION #}">'
-                  custom = '<link rel="stylesheet" href="/luci-static/doornet2/istoreos-dark.css">'
-                  if needle in text and custom not in text:
-                      text = text.replace(needle, needle + '\n\t' + custom, 1)
-                      patched_link += 1
-
-                  # Older Lua/HTM variants: insert after the Argon cascade stylesheet.
-                  if custom not in text:
-                      lines = text.splitlines()
-                      out = []
-                      inserted = False
-                      for line in lines:
-                          out.append(line)
-                          if (not inserted and 'stylesheet' in line and
-                                  ('cascade.css' in line or 'cascades.css' in line)):
-                              out.append('\t' + custom)
-                              inserted = True
-                      if inserted:
-                          text = '\n'.join(out) + ('\n' if old.endswith('\n') else '')
-                          patched_link += 1
-
-                  before_brand = text
-                  text = text.replace('>{{ hostname }}</a>', '>DoorNet2</a>')
-                  text = text.replace('><%= hostname %></a>', '>DoorNet2</a>')
-                  text = text.replace('><%=hostname%></a>', '>DoorNet2</a>')
-                  if text != before_brand:
-                      patched_brand += 1
-
-                  if text != old:
-                      p.write_text(text)
-                      print('patched theme header:', p)
-
-          if patched_link < 1:
-              raise SystemExit('ERROR: could not inject DoorNet2 visual stylesheet into Argon header')
-
-          print('visual links patched:', patched_link)
-          print('brand templates patched:', patched_brand)
-          PY2
-
-          # Force dark mode and iStoreOS-like accent on every R28 first boot.
-          cat > files/etc/uci-defaults/96-doornet2-istoreos-visual <<'EOF'
-          #!/bin/sh
-
-          if uci -q get argon.@global[0] >/dev/null 2>&1; then
-              uci -q set argon.@global[0].mode='dark'
-              uci -q set argon.@global[0].primary='#6574e8'
-              uci -q set argon.@global[0].dark_primary='#6574e8'
-              uci -q set argon.@global[0].blur='0'
-              uci -q set argon.@global[0].blur_dark='0'
-              uci -q set argon.@global[0].transparency='0'
-              uci -q set argon.@global[0].transparency_dark='0'
-              uci -q commit argon
-          fi
-
-          if uci -q get luci.main >/dev/null 2>&1; then
-              uci -q set luci.main.mediaurlbase='/luci-static/argon'
-              uci -q set luci.main.lang='zh_cn'
-              uci -q commit luci
-          fi
-
-          rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
-          exit 0
-          EOF
-
-          chmod 755 files/etc/uci-defaults/96-doornet2-istoreos-visual
-
-          echo "===== R28 VISUAL FILES ====="
-          test -s files/www/luci-static/doornet2/istoreos-dark.css
-          test -x files/etc/uci-defaults/96-doornet2-istoreos-visual
-          grep -nE 'DoorNet2|dn-bg|dn-card|quickstart' \
-            files/www/luci-static/doornet2/istoreos-dark.css \
-            | head -30
-          grep -nE 'mode=.dark.|dark_primary|mediaurlbase' \
-            files/etc/uci-defaults/96-doornet2-istoreos-visual
 
       # ============================================================
-      # 4A. R28 runtime monitor
+      # 4A. R33 runtime monitor
       #
       # Adds a lightweight top-right status badge to LuCI:
       #   - RK3399 CPU/SoC temperature
@@ -865,7 +569,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== ADD DOORNET2 R28 RUNTIME MONITOR ====="
+          echo "===== ADD DOORNET2 R33 THEME-INDEPENDENT RUNTIME MONITOR ====="
 
           mkdir -p \
             files/usr/bin \
@@ -1058,40 +762,33 @@ jobs:
           })();
           EOF
 
-          cat >> files/www/luci-static/doornet2/istoreos-dark.css <<'EOF'
-
-          /* ---------- DoorNet2 R28 runtime monitor ---------- */
+          cat > files/www/luci-static/doornet2/runtime-monitor.css <<'EOF'
           #dn-runtime-monitor {
             position: fixed;
-            top: 11px;
-            right: 78px;
+            top: 10px;
+            right: 76px;
             z-index: 10020;
             display: flex;
             align-items: center;
-            gap: 7px;
-            min-height: 28px;
-            padding: 0 10px;
-            border: 1px solid rgba(255,255,255,.09);
-            border-radius: 8px;
-            background: rgba(42,42,42,.94);
-            color: #e8eaed;
-            box-shadow: 0 1px 2px rgba(0,0,0,.20);
-            font-size: 12px;
+            gap: 6px;
+            min-height: 26px;
+            padding: 0 9px;
+            border: 1px solid rgba(127,127,127,.24);
+            border-radius: 7px;
+            background: rgba(30,30,30,.88);
+            color: #f3f4f6;
+            box-shadow: 0 1px 4px rgba(0,0,0,.18);
+            font-size: 11px;
             line-height: 1;
             white-space: nowrap;
             pointer-events: none;
-            backdrop-filter: blur(4px);
+            backdrop-filter: blur(6px);
           }
 
           #dn-runtime-monitor .dn-runtime-dot {
             width: 7px;
             height: 7px;
             border-radius: 50%;
-            background: #62d394;
-            box-shadow: 0 0 0 2px rgba(98,211,148,.12);
-          }
-
-          #dn-runtime-monitor.dn-temp-normal .dn-runtime-dot {
             background: #62d394;
           }
 
@@ -1108,64 +805,105 @@ jobs:
           }
 
           #dn-runtime-monitor .dn-runtime-sep {
-            color: #777d86;
+            opacity: .45;
           }
 
           @media (max-width: 900px) {
             #dn-runtime-monitor {
               top: auto;
               right: 10px;
-              bottom: 10px;
-              font-size: 11px;
-              min-height: 26px;
-              padding: 0 8px;
+              bottom: 58px;
+              max-width: calc(100vw - 20px);
             }
           }
           EOF
 
-          # Load the runtime monitor JS globally from Argon's header.
           python3 - <<'PY2'
           from pathlib import Path
 
-          roots = [
-              Path('package/lean/luci-theme-argon/ucode/template/themes/argon'),
-              Path('package/lean/luci-theme-argon/luasrc/view/themes/argon'),
+          headers = [
+              Path('package/lean/luci-theme-design/luasrc/view/themes/design/header.htm'),
+              Path('package/lean/luci-theme-argon/luasrc/view/themes/argon/header.htm'),
           ]
 
-          script = '<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
+          css = '<link rel="stylesheet" href="/luci-static/doornet2/runtime-monitor.css">'
+          js = '<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
+
           patched = 0
 
-          for root in roots:
-              if not root.exists():
+          for p in headers:
+              if not p.exists():
                   continue
-              for p in root.glob('header.*'):
-                  text = p.read_text(errors='ignore')
-                  if script in text:
-                      continue
 
-                  css = '<link rel="stylesheet" href="/luci-static/doornet2/istoreos-dark.css">'
-                  if css in text:
-                      text = text.replace(css, css + '\n\t' + script, 1)
-                  elif '</head>' in text:
-                      text = text.replace('</head>', '\t' + script + '\n</head>', 1)
-                  else:
-                      continue
+              text = p.read_text(errors='ignore')
+              old = text
 
+              inject = []
+              if css not in text:
+                  inject.append(css)
+              if js not in text:
+                  inject.append(js)
+
+              if inject:
+                  if '</head>' not in text:
+                      raise SystemExit('ERROR: theme header has no </head>: %s' % p)
+                  text = text.replace(
+                      '</head>',
+                      '\n'.join('\t' + x for x in inject) + '\n</head>',
+                      1
+                  )
+
+              if text != old:
                   p.write_text(text)
                   patched += 1
                   print('patched runtime monitor header:', p)
 
-          if patched < 1:
-              raise SystemExit('ERROR: could not inject DoorNet2 runtime monitor JS into Argon header')
+          design = Path('package/lean/luci-theme-design/luasrc/view/themes/design/header.htm')
+          final = design.read_text(errors='ignore')
 
-          print('runtime monitor headers patched:', patched)
+          if css not in final or js not in final:
+              raise SystemExit('ERROR: Design header monitor injection failed')
+
+          print('runtime monitor source headers patched:', patched)
           PY2
+
+          cat > files/etc/uci-defaults/99-doornet2-runtime-header-fix <<'EOF'
+          #!/bin/sh
+
+          CSS='<link rel="stylesheet" href="/luci-static/doornet2/runtime-monitor.css">'
+          JS='<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
+
+          patch_header()
+          {
+              local hdr="$1"
+              [ -f "$hdr" ] || return 0
+
+              if ! grep -q 'runtime-monitor.css' "$hdr"; then
+                  sed -i "\|</head>|i\\$CSS" "$hdr"
+              fi
+
+              if ! grep -q 'runtime-monitor.js' "$hdr"; then
+                  sed -i "\|</head>|i\\$JS" "$hdr"
+              fi
+          }
+
+          patch_header /usr/lib/lua/luci/view/themes/design/header.htm
+          patch_header /usr/lib/lua/luci/view/themes/argon/header.htm
+
+          rm -rf \
+            /tmp/luci-indexcache \
+            /tmp/luci-modulecache \
+            /tmp/luci-templatecache
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/99-doornet2-runtime-header-fix
+          sh -n files/etc/uci-defaults/99-doornet2-runtime-header-fix
 
           cat > files/etc/uci-defaults/98-doornet2-time <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 default timezone and NTP.
-          # The runtime monitor displays the router's own local clock.
           uci -q set system.@system[0].zonename='Asia/Shanghai'
           uci -q set system.@system[0].timezone='CST-8'
 
@@ -1186,22 +924,28 @@ jobs:
               /etc/init.d/sysntpd restart >/dev/null 2>&1 || true
           fi
 
-          rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
+          rm -rf \
+            /tmp/luci-indexcache \
+            /tmp/luci-modulecache \
+            /tmp/luci-templatecache
+
           exit 0
           EOF
 
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R28 RUNTIME MONITOR FILES ====="
+          echo "===== R33 RUNTIME MONITOR FILES ====="
           test -x files/usr/bin/doornet2-runtime-status
           test -s files/usr/lib/lua/luci/controller/doornet2_runtime.lua
           test -s files/www/luci-static/doornet2/runtime-monitor.js
+          test -s files/www/luci-static/doornet2/runtime-monitor.css
           test -x files/etc/uci-defaults/98-doornet2-time
-          grep -Rns 'runtime-monitor.js' \
-            package/lean/luci-theme-argon/ucode/template/themes/argon \
-            package/lean/luci-theme-argon/luasrc/view/themes/argon \
-            2>/dev/null | head -20
+          test -x files/etc/uci-defaults/99-doornet2-runtime-header-fix
+          grep -q 'runtime-monitor.css' \
+            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          grep -q 'runtime-monitor.js' \
+            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
 
 
       # ============================================================
@@ -1512,10 +1256,10 @@ jobs:
           DOORNET2_MMC_LAYOUT='mmcblk0-tf-mmcblk1-emmc'
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
-          DOORNET2_UI='quickstart-istoreos-dark-v2'
+          DOORNET2_UI='quickstart-design-dark-v1'
           DOORNET2_PASSWALL='builtin-online-feed-v1'
           DOORNET2_NETWORK_APPS='smartdns-uu-runtime-adguard-online-v2'
-          DOORNET2_RUNTIME_MONITOR='thermal-time-v1'
+          DOORNET2_RUNTIME_MONITOR='thermal-time-v2'
           EOF
 
           cat files/etc/doornet2_release
@@ -4373,7 +4117,7 @@ jobs:
           CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
 
-          # DoorNet2 R32 Go compatibility policy:
+          # DoorNet2 R33 Go compatibility policy:
           # Keep Xray as the main PassWall core, pinned above to 25.1.30
           # (compatible with this tree's Go 1.23.1).
           # Current Sing-box 1.14.0 and v2ray-plugin 5.49.0 require Go 1.25.5,
@@ -4418,8 +4162,10 @@ jobs:
           CONFIG_PACKAGE_luci-app-quickstart=y
           CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
 
-          # Argon theme, while Bootstrap remains installed as fallback
+          # R33 UI:
+          # Design is default. Argon and Bootstrap remain as recovery themes.
           CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-theme-design=y
           CONFIG_PACKAGE_luci-theme-argon=y
           CONFIG_PACKAGE_luci-app-argon-config=y
 
@@ -4559,18 +4305,25 @@ jobs:
           sh -n files/etc/uci-defaults/97-doornet2-network-apps
 
           echo
-          echo "===== R23 UI PACKAGES ====="
+          echo "===== R33 UI PACKAGES ====="
 
           grep -E \
-            '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap|luci-theme-argon|luci-app-argon-config)=y$' \
+            '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap|luci-theme-design|luci-theme-argon|luci-app-argon-config)=y$' \
             .config || true
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
 
+          test -f package/lean/luci-theme-design/Makefile
+          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
           test -x files/etc/uci-defaults/95-doornet2-ui
+          test -f files/etc/config/design
+          grep -q "mediaurlbase='/luci-static/design'" \
+            files/etc/uci-defaults/95-doornet2-ui
+          grep -q "option mode 'dark'" files/etc/config/design
 
 
       # ============================================================
@@ -4587,7 +4340,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R32 guard: the obsolete fixed-download UU package must not appear
+          # R33 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4765,7 +4518,9 @@ jobs:
             "extroot": false,
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
-            "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2"
+            "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2",
+            "ui": "quickstart-design-dark-v1",
+            "runtime_monitor": "thermal-time-v2"
           }
           EOF
 
@@ -4804,6 +4559,15 @@ jobs:
           - Expanded TF p2 partition table is preserved during sysupgrade
           - ext4 is automatically grown back to the existing TF p2 size
           - eMMC keeps the original Rockchip upgrade behaviour
+
+          R33 interface:
+
+          - Design theme is the default LuCI shell
+          - QuickStart remains the iStoreOS-style home/workflow page
+          - Design dark mode is enabled by default
+          - Argon and Bootstrap remain installed as recovery themes
+          - CPU temperature + router date/time use a separate theme-independent badge
+          - Installed theme headers are patched on first boot as a safety net
 
           Online-updatable network applications:
 
@@ -5041,7 +4805,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R28 iStoreOS visual + online apps + runtime monitor build finished"
+          echo "DoorNet2 R33 Design UI + QuickStart + online apps + runtime monitor build finished"
           echo "========================================"
 
           echo
@@ -5224,62 +4988,88 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R31 ISTOREOS VISUAL UI ====="
+          echo "===== R33 DESIGN + QUICKSTART UI ====="
 
           grep -q \
-            "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
+            "DOORNET2_UI='quickstart-design-dark-v1'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
 
-          test -f \
-            feeds/nas/network/services/quickstart/Makefile
+          test -f feeds/nas/network/services/quickstart/Makefile
+          test -f feeds/nas_luci/luci/luci-app-quickstart/Makefile
+          test -f package/lean/luci-theme-design/Makefile
+          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          test -f package/lean/luci-theme-design/htdocs/luci-static/design/css/style.css
 
-          test -f \
-            feeds/nas_luci/luci/luci-app-quickstart/Makefile
+          grep -q '/cgi-bin/luci/admin/quickstart/' \
+            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
 
-          test -f \
-            package/lean/luci-theme-argon/Makefile
-
-          test -x \
+          test -x files/etc/uci-defaults/95-doornet2-ui
+          grep -q "mediaurlbase='/luci-static/design'" \
             files/etc/uci-defaults/95-doornet2-ui
 
-          grep -nE \
-            "mediaurlbase|lang='zh_cn'" \
-            files/etc/uci-defaults/95-doornet2-ui
+          test -f files/etc/config/design
+          grep -q "option mode 'dark'" files/etc/config/design
+          grep -q "option navbar_proxy 'passwall'" files/etc/config/design
 
-          grep -q \
-            "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
-            files/etc/doornet2_release
+          DESIGN_IPK="$(
+            find ./bin \
+              -type f \
+              -name 'luci-theme-design_*.ipk' \
+              -print \
+              | head -n 1
+          )"
 
-          test -s \
-            files/www/luci-static/doornet2/istoreos-dark.css
+          if [ -z "$DESIGN_IPK" ]; then
+              echo "ERROR: luci-theme-design IPK was not generated."
+              exit 1
+          fi
 
-          test -x \
-            files/etc/uci-defaults/96-doornet2-istoreos-visual
+          echo "Design package: $DESIGN_IPK"
 
-          grep -q 'var(--dn-card)' \
-            files/www/luci-static/doornet2/istoreos-dark.css
+          ROOT_DESIGN_HEADER="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/usr/lib/lua/luci/view/themes/design/header.htm' \
+              -print \
+              | head -n 1
+          )"
 
-          grep -Rqs 'luci-static/doornet2/istoreos-dark.css' \
-            package/lean/luci-theme-argon/ucode/template/themes/argon \
-            package/lean/luci-theme-argon/luasrc/view/themes/argon 2>/dev/null
+          if [ -z "$ROOT_DESIGN_HEADER" ]; then
+              echo "ERROR: installed Design header not found in build root."
+              exit 1
+          fi
 
-          grep -q "mode='dark'" \
-            files/etc/uci-defaults/96-doornet2-istoreos-visual
+          echo "Installed Design header: $ROOT_DESIGN_HEADER"
+          grep -q 'runtime-monitor.css' "$ROOT_DESIGN_HEADER"
+          grep -q 'runtime-monitor.js' "$ROOT_DESIGN_HEADER"
 
-          grep -q "dark_primary='#6574e8'" \
-            files/etc/uci-defaults/96-doornet2-istoreos-visual
+          ROOT_DESIGN_CSS="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/www/luci-static/design/css/style.css' \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$ROOT_DESIGN_CSS" ]; then
+              echo "ERROR: installed Design static CSS not found in build root."
+              exit 1
+          fi
+
+          echo "Installed Design CSS: $ROOT_DESIGN_CSS"
 
 
           echo
-          echo "===== R28 RUNTIME MONITOR ====="
+          echo "===== R33 RUNTIME MONITOR ====="
 
           grep -q \
-            "DOORNET2_RUNTIME_MONITOR='thermal-time-v1'" \
+            "DOORNET2_RUNTIME_MONITOR='thermal-time-v2'" \
             files/etc/doornet2_release
 
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set$' .config
@@ -5299,12 +5089,17 @@ jobs:
           grep -q 'doornet2_runtime' \
             files/www/luci-static/doornet2/runtime-monitor.js
 
+          test -s files/www/luci-static/doornet2/runtime-monitor.css
           grep -q '#dn-runtime-monitor' \
-            files/www/luci-static/doornet2/istoreos-dark.css
+            files/www/luci-static/doornet2/runtime-monitor.css
 
-          grep -Rqs 'luci-static/doornet2/runtime-monitor.js' \
-            package/lean/luci-theme-argon/ucode/template/themes/argon \
-            package/lean/luci-theme-argon/luasrc/view/themes/argon 2>/dev/null
+          grep -q 'runtime-monitor.css' \
+            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          grep -q 'runtime-monitor.js' \
+            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+
+          test -x files/etc/uci-defaults/99-doornet2-runtime-header-fix
+          sh -n files/etc/uci-defaults/99-doornet2-runtime-header-fix
 
           test -x files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
@@ -5336,5 +5131,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R28 ISTOREOS VISUAL + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
+          echo "R33 DESIGN UI + QUICKSTART + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
           echo "========================================"
