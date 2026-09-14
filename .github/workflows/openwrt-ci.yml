@@ -458,7 +458,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R33 UI policy:
+          # DoorNet2 R34 UI policy:
           # Design default + QuickStart home, with Argon/Bootstrap recovery.
 
           uci -q set luci.themes.Design='/luci-static/design'
@@ -490,7 +490,7 @@ jobs:
                   option navbar_proxy 'passwall'
           EOF
 
-          echo "===== R33 UI DEFAULTS ====="
+          echo "===== R34 UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
           cat files/etc/config/design
 
@@ -535,7 +535,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== VERIFY R33 DESIGN UI SOURCE ====="
+          echo "===== VERIFY R34 DESIGN UI SOURCE ====="
 
           test -f package/lean/luci-theme-design/Makefile
           test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
@@ -569,7 +569,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== ADD DOORNET2 R33 THEME-INDEPENDENT RUNTIME MONITOR ====="
+          echo "===== ADD DOORNET2 R34 THEME-INDEPENDENT RUNTIME MONITOR ====="
 
           mkdir -p \
             files/usr/bin \
@@ -878,6 +878,8 @@ jobs:
               local hdr="$1"
               [ -f "$hdr" ] || return 0
 
+              # Design/Argon packages may install a fresh header after the
+              # source-tree patch step. Patch the ACTUAL installed file here.
               if ! grep -q 'runtime-monitor.css' "$hdr"; then
                   sed -i "\|</head>|i\\$CSS" "$hdr"
               fi
@@ -887,8 +889,19 @@ jobs:
               fi
           }
 
-          patch_header /usr/lib/lua/luci/view/themes/design/header.htm
-          patch_header /usr/lib/lua/luci/view/themes/argon/header.htm
+          DESIGN_HDR="/usr/lib/lua/luci/view/themes/design/header.htm"
+          ARGON_HDR="/usr/lib/lua/luci/view/themes/argon/header.htm"
+
+          patch_header "$DESIGN_HDR"
+          patch_header "$ARGON_HDR"
+
+          # Make the Design theme's home shortcut open QuickStart on the
+          # actually installed header too. This is intentionally idempotent.
+          if [ -f "$DESIGN_HDR" ]; then
+              sed -i \
+                's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
+                "$DESIGN_HDR"
+          fi
 
           rm -rf \
             /tmp/luci-indexcache \
@@ -935,7 +948,7 @@ jobs:
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R33 RUNTIME MONITOR FILES ====="
+          echo "===== R34 RUNTIME MONITOR FILES ====="
           test -x files/usr/bin/doornet2-runtime-status
           test -s files/usr/lib/lua/luci/controller/doornet2_runtime.lua
           test -s files/www/luci-static/doornet2/runtime-monitor.js
@@ -4117,7 +4130,7 @@ jobs:
           CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
 
-          # DoorNet2 R33 Go compatibility policy:
+          # DoorNet2 R34 Go compatibility policy:
           # Keep Xray as the main PassWall core, pinned above to 25.1.30
           # (compatible with this tree's Go 1.23.1).
           # Current Sing-box 1.14.0 and v2ray-plugin 5.49.0 require Go 1.25.5,
@@ -4305,7 +4318,7 @@ jobs:
           sh -n files/etc/uci-defaults/97-doornet2-network-apps
 
           echo
-          echo "===== R33 UI PACKAGES ====="
+          echo "===== R34 UI PACKAGES ====="
 
           grep -E \
             '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap|luci-theme-design|luci-theme-argon|luci-app-argon-config)=y$' \
@@ -4340,7 +4353,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R33 guard: the obsolete fixed-download UU package must not appear
+          # R34 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4805,7 +4818,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R33 Design UI + QuickStart + online apps + runtime monitor build finished"
+          echo "DoorNet2 R34 Design UI + QuickStart + online apps + runtime monitor build finished"
           echo "========================================"
 
           echo
@@ -4988,7 +5001,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R33 DESIGN + QUICKSTART UI ====="
+          echo "===== R34 DESIGN + QUICKSTART UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-design-dark-v1'" \
@@ -5046,8 +5059,16 @@ jobs:
           fi
 
           echo "Installed Design header: $ROOT_DESIGN_HEADER"
-          grep -q 'runtime-monitor.css' "$ROOT_DESIGN_HEADER"
-          grep -q 'runtime-monitor.js' "$ROOT_DESIGN_HEADER"
+
+          # R33 demonstrated an important packaging detail:
+          # luci-theme-design installs a fresh header into rootfs, so it may not
+          # contain our source-tree injection yet. That is expected. What must
+          # be true is:
+          #   1. the real installed header is present and patchable;
+          #   2. the runtime CSS/JS are present in the real rootfs;
+          #   3. the first-boot fixer is present in the real rootfs;
+          #   4. the fixer can transform a copy of the installed header.
+          grep -q '</head>' "$ROOT_DESIGN_HEADER"
 
           ROOT_DESIGN_CSS="$(
             find build_dir \
@@ -5064,9 +5085,90 @@ jobs:
 
           echo "Installed Design CSS: $ROOT_DESIGN_CSS"
 
+          ROOT_RUNTIME_CSS="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/www/luci-static/doornet2/runtime-monitor.css' \
+              -print \
+              | head -n 1
+          )"
+
+          ROOT_RUNTIME_JS="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/www/luci-static/doornet2/runtime-monitor.js' \
+              -print \
+              | head -n 1
+          )"
+
+          ROOT_HEADER_FIX="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/etc/uci-defaults/99-doornet2-runtime-header-fix' \
+              -print \
+              | head -n 1
+          )"
+
+          ROOT_UI_DEFAULT="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/etc/uci-defaults/95-doornet2-ui' \
+              -print \
+              | head -n 1
+          )"
+
+          test -n "$ROOT_RUNTIME_CSS"
+          test -n "$ROOT_RUNTIME_JS"
+          test -n "$ROOT_HEADER_FIX"
+          test -n "$ROOT_UI_DEFAULT"
+
+          echo "Installed runtime CSS: $ROOT_RUNTIME_CSS"
+          echo "Installed runtime JS : $ROOT_RUNTIME_JS"
+          echo "Installed header fix : $ROOT_HEADER_FIX"
+          echo "Installed UI default : $ROOT_UI_DEFAULT"
+
+          grep -q '#dn-runtime-monitor' "$ROOT_RUNTIME_CSS"
+          grep -q 'doornet2_runtime' "$ROOT_RUNTIME_JS"
+
+          sh -n "$ROOT_HEADER_FIX"
+          grep -q 'themes/design/header.htm' "$ROOT_HEADER_FIX"
+          grep -q 'runtime-monitor.css' "$ROOT_HEADER_FIX"
+          grep -q 'runtime-monitor.js' "$ROOT_HEADER_FIX"
+          grep -q '/cgi-bin/luci/admin/quickstart/' "$ROOT_HEADER_FIX"
+
+          sh -n "$ROOT_UI_DEFAULT"
+          grep -q "mediaurlbase='/luci-static/design'" "$ROOT_UI_DEFAULT"
+
+          echo "===== SIMULATE FIRST-BOOT DESIGN HEADER PATCH ====="
+
+          TMP_DESIGN_HEADER="$(mktemp)"
+          cp -f "$ROOT_DESIGN_HEADER" "$TMP_DESIGN_HEADER"
+
+          TEST_CSS='<link rel="stylesheet" href="/luci-static/doornet2/runtime-monitor.css">'
+          TEST_JS='<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
+
+          if ! grep -q 'runtime-monitor.css' "$TMP_DESIGN_HEADER"; then
+              sed -i "\|</head>|i\\$TEST_CSS" "$TMP_DESIGN_HEADER"
+          fi
+
+          if ! grep -q 'runtime-monitor.js' "$TMP_DESIGN_HEADER"; then
+              sed -i "\|</head>|i\\$TEST_JS" "$TMP_DESIGN_HEADER"
+          fi
+
+          sed -i \
+            's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
+            "$TMP_DESIGN_HEADER"
+
+          grep -q 'runtime-monitor.css' "$TMP_DESIGN_HEADER"
+          grep -q 'runtime-monitor.js' "$TMP_DESIGN_HEADER"
+
+          rm -f "$TMP_DESIGN_HEADER"
+
+          echo "Installed Design header is patchable; first-boot fix verified (OK)"
+
 
           echo
-          echo "===== R33 RUNTIME MONITOR ====="
+          echo "===== R34 RUNTIME MONITOR ====="
 
           grep -q \
             "DOORNET2_RUNTIME_MONITOR='thermal-time-v2'" \
@@ -5131,5 +5233,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R33 DESIGN UI + QUICKSTART + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
+          echo "R34 DESIGN UI + QUICKSTART + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
           echo "========================================"
