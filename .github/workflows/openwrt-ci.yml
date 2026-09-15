@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore
+name: DoorNet2-OpenWrt-iStore-R1
 
 on:
   workflow_dispatch:
@@ -129,7 +129,11 @@ jobs:
           BUILD_DAY="$(date -u +'%Y.%m.%d')"
           SHORT_SHA="${GITHUB_SHA:0:7}"
 
-          VERSION="${BUILD_DAY}-r${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          # DoorNet2 public/stable numbering restarts here.
+          # R1 -> R2 -> R3... is bumped manually in this workflow.
+          RELEASE_NUM="1"
+
+          VERSION="${BUILD_DAY}-r${RELEASE_NUM}-${SHORT_SHA}"
           TAG="doornet2-${VERSION}"
 
           echo "DOORNET2_VERSION=${VERSION}" >> "$GITHUB_ENV"
@@ -194,20 +198,53 @@ jobs:
             -p istore \
             luci-app-store
 
-          echo "===== VERIFY PASSWALL FEEDS ====="
+          echo "===== PIN PASSWALL LUCI TO 25.1.15-1 ====="
+
+          test -d feeds/passwall_luci/.git
+
+          git -C feeds/passwall_luci fetch \
+            --force \
+            --depth 1 \
+            origin \
+            refs/tags/25.1.15-1:refs/tags/25.1.15-1
+
+          git -C feeds/passwall_luci checkout -f 25.1.15-1
+
+          PASSWALL_COMMIT="$(git -C feeds/passwall_luci rev-parse --short=12 HEAD)"
+          echo "Pinned PassWall commit: ${PASSWALL_COMMIT}"
 
           test -f feeds/passwall_luci/luci-app-passwall/Makefile
           test -d feeds/passwall_packages
 
+          grep -q '^PKG_VERSION:=25\.1\.15$' \
+            feeds/passwall_luci/luci-app-passwall/Makefile
+
+          grep -q '^PKG_RELEASE:=1$' \
+            feeds/passwall_luci/luci-app-passwall/Makefile
+
+          # R1 is an iptables/firewall3 build. Ensure the pinned PassWall source
+          # actually contains the legacy iptables backend and its expected
+          # dependency declaration before we spend hours compiling.
+          grep -q 'Iptables Transparent Proxy' \
+            feeds/passwall_luci/luci-app-passwall/Makefile
+          grep -q 'select PACKAGE_iptables-zz-legacy' \
+            feeds/passwall_luci/luci-app-passwall/Makefile
+
+          # Refresh the active package symlink after checking out the tag.
+          rm -rf package/feeds/passwall_luci/luci-app-passwall
+
           ./scripts/feeds install \
             -d y \
+            -f \
             -p passwall_luci \
             luci-app-passwall
 
+          echo "===== VERIFY PASSWALL 25.1.15-1 ====="
+
           grep -nE \
-            'PKG_NAME:=luci-app-passwall|PKG_VERSION|LUCI_DEPENDS' \
+            'PKG_NAME:=luci-app-passwall|PKG_VERSION|PKG_RELEASE|LUCI_DEPENDS' \
             feeds/passwall_luci/luci-app-passwall/Makefile \
-            | head -20
+            | head -30
 
 
       - name: Pin PassWall Go cores for DoorNet2 Go 1.23
@@ -222,8 +259,10 @@ jobs:
           #   v2ray-plugin 5.49.0 -> Go >= 1.25.5
           #   current Xray        -> newer Go toolchain
           #
-          # R32 therefore keeps Xray as the built-in PassWall core, pins it to
-          # Xray 25.1.30 (go.mod: go 1.23), and disables Sing-box/v2ray-plugin
+          # DoorNet2 R1 pairs PassWall 25.1.15-1 with Xray 25.1.30,
+          # a compatible 2025-era combination. Xray 25.1.30 uses Go 1.23,
+          # while Sing-box/v2ray-plugin from the current packages feed require
+          # newer Go toolchains, so those remain disabled.
           # in the firmware configuration below. Do not replace the whole Go
           # toolchain: TF-first/eMMC fallback and the R23 stable buildroot stay
           # untouched.
@@ -458,7 +497,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R34 UI policy:
+          # DoorNet2 R1 UI policy:
           # Design default + QuickStart home, with Argon/Bootstrap recovery.
 
           uci -q set luci.themes.Design='/luci-static/design'
@@ -490,7 +529,7 @@ jobs:
                   option navbar_proxy 'passwall'
           EOF
 
-          echo "===== R34 UI DEFAULTS ====="
+          echo "===== R1 UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
           cat files/etc/config/design
 
@@ -504,10 +543,11 @@ jobs:
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 network apps are installed but intentionally not enabled
-          # automatically. SmartDNS and AdGuard Home can both provide DNS,
-          # so enabling them blindly may cause a port-53 conflict.
-          # Configure the desired topology in LuCI first, then enable services.
+          # DoorNet2 R1 ships the network apps but keeps them disabled on a clean boot
+          # so no credentials or DNS ownership are silently imposed.
+          # The validated topology is:
+          #   dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
+          # SmartDNS tested upstreams: 223.5.5.5 and 119.29.29.29.
 
           for svc in smartdns adguardhome uuplugin; do
               if [ -x "/etc/init.d/$svc" ]; then
@@ -525,7 +565,7 @@ jobs:
 
 
       # ============================================================
-      # 4. R33 UI strategy
+      # 4. R1 UI strategy
       #
       # Use the native Design theme for the whole shell.
       # No global Argon "fake iStoreOS" stylesheet is injected.
@@ -535,7 +575,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== VERIFY R34 DESIGN UI SOURCE ====="
+          echo "===== VERIFY R1 DESIGN UI SOURCE ====="
 
           test -f package/lean/luci-theme-design/Makefile
           test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
@@ -555,348 +595,28 @@ jobs:
 
 
       # ============================================================
-      # 4A. R33 runtime monitor
+      # 4A. R1 time + Design first-boot fix
       #
-      # Adds a lightweight top-right status badge to LuCI:
-      #   - RK3399 CPU/SoC temperature
-      #   - Current device date/time
-      #   - NTP enabled, Asia/Shanghai timezone by default
-      #
-      # This is userspace-only and does not touch boot/storage logic.
+      # R1 intentionally removes the floating CPU/date/time badge.
+      # RK3399 thermal support remains untouched, so the normal LuCI
+      # system/CPU information line can continue to display temperature.
+      # Timezone/NTP also remain configured.
       # ============================================================
 
-      - name: Add DoorNet2 temperature and date time monitor
+      - name: Add DoorNet2 R1 time and Design first-boot fix
         run: |
           set -e
 
-          echo "===== ADD DOORNET2 R34 THEME-INDEPENDENT RUNTIME MONITOR ====="
+          mkdir -p files/etc/uci-defaults
 
-          mkdir -p \
-            files/usr/bin \
-            files/usr/lib/lua/luci/controller \
-            files/www/luci-static/doornet2 \
-            files/etc/uci-defaults
-
-          cat > files/usr/bin/doornet2-runtime-status <<'EOF'
+          # The Design package can install a fresh runtime header after source
+          # patching. Keep only the QuickStart-home patch; do not inject any
+          # floating runtime-monitor CSS/JS.
+          cat > files/etc/uci-defaults/99-doornet2-design-header-fix <<'EOF'
           #!/bin/sh
-
-          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-
-          json_escape()
-          {
-              printf '%s' "$1" \
-                | sed \
-                    -e 's/\\/\\\\/g' \
-                    -e 's/"/\\"/g' \
-                    -e ':a;N;$!ba;s/\n/\\n/g'
-          }
-
-          format_temp()
-          {
-              local raw whole decimal
-              raw="$1"
-
-              case "$raw" in
-                  ''|*[!0-9-]*)
-                      return 1
-                      ;;
-              esac
-
-              if [ "$raw" -gt 1000 ] 2>/dev/null; then
-                  whole=$((raw / 1000))
-                  decimal=$(((raw % 1000) / 100))
-                  printf '%s.%s' "$whole" "$decimal"
-              else
-                  printf '%s.0' "$raw"
-              fi
-          }
-
-          cpu_temp=''
-          cpu_type=''
-          fallback_temp=''
-          fallback_type=''
-
-          for zone in /sys/class/thermal/thermal_zone*; do
-              [ -d "$zone" ] || continue
-              [ -r "$zone/temp" ] || continue
-
-              raw="$(cat "$zone/temp" 2>/dev/null || true)"
-              value="$(format_temp "$raw" 2>/dev/null || true)"
-              [ -n "$value" ] || continue
-
-              type="$(cat "$zone/type" 2>/dev/null || echo thermal)"
-
-              if [ -z "$fallback_temp" ]; then
-                  fallback_temp="$value"
-                  fallback_type="$type"
-              fi
-
-              case "$(printf '%s' "$type" | tr '[:upper:]' '[:lower:]')" in
-                  *cpu*|*soc*|*package*)
-                      if [ -z "$cpu_temp" ]; then
-                          cpu_temp="$value"
-                          cpu_type="$type"
-                      fi
-                      ;;
-              esac
-          done
-
-          if [ -z "$cpu_temp" ]; then
-              cpu_temp="$fallback_temp"
-              cpu_type="$fallback_type"
-          fi
-
-          now="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
-          timezone="$(date '+%Z' 2>/dev/null || true)"
-
-          if [ -z "$cpu_temp" ]; then
-              cpu_temp='--'
-              cpu_type='unavailable'
-          fi
-
-          printf '{'
-          printf '"ok":true,'
-          printf '"temperature":"%s",' "$(json_escape "$cpu_temp")"
-          printf '"thermal_type":"%s",' "$(json_escape "$cpu_type")"
-          printf '"datetime":"%s",' "$(json_escape "$now")"
-          printf '"timezone":"%s"' "$(json_escape "$timezone")"
-          printf '}\n'
-          EOF
-
-          chmod 755 files/usr/bin/doornet2-runtime-status
-          sh -n files/usr/bin/doornet2-runtime-status
-
-          cat > files/usr/lib/lua/luci/controller/doornet2_runtime.lua <<'EOF'
-          module("luci.controller.doornet2_runtime", package.seeall)
-
-          function index()
-              local page = entry(
-                  {"admin", "status", "doornet2_runtime"},
-                  call("action_status")
-              )
-              page.leaf = true
-          end
-
-          function action_status()
-              local http = require "luci.http"
-              local sys = require "luci.sys"
-
-              http.prepare_content("application/json")
-              http.header("Cache-Control", "no-store")
-              http.write(sys.exec("/usr/bin/doornet2-runtime-status 2>/dev/null"))
-          end
-          EOF
-
-          cat > files/www/luci-static/doornet2/runtime-monitor.js <<'EOF'
-          (function() {
-            'use strict';
-
-            if (window.location.pathname.indexOf('/admin/') < 0)
-              return;
-
-            function makeMonitor() {
-              var old = document.getElementById('dn-runtime-monitor');
-              if (old) return old;
-
-              var box = document.createElement('div');
-              box.id = 'dn-runtime-monitor';
-              box.setAttribute('title', 'DoorNet2 RK3399 运行状态');
-              box.innerHTML =
-                '<span class="dn-runtime-dot"></span>' +
-                '<span class="dn-runtime-temp">CPU --°C</span>' +
-                '<span class="dn-runtime-sep">·</span>' +
-                '<span class="dn-runtime-time">---- -- -- --:--:--</span>';
-
-              document.body.appendChild(box);
-              return box;
-            }
-
-            function setLevel(box, value) {
-              box.classList.remove('dn-temp-normal', 'dn-temp-warm', 'dn-temp-hot');
-              var n = parseFloat(value);
-              if (isNaN(n)) return;
-              if (n >= 80) box.classList.add('dn-temp-hot');
-              else if (n >= 70) box.classList.add('dn-temp-warm');
-              else box.classList.add('dn-temp-normal');
-            }
-
-            function update() {
-              var box = makeMonitor();
-
-              fetch('/cgi-bin/luci/admin/status/doornet2_runtime', {
-                method: 'GET',
-                credentials: 'same-origin',
-                cache: 'no-store'
-              })
-              .then(function(r) {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.json();
-              })
-              .then(function(data) {
-                if (!data || !data.ok) throw new Error('invalid status');
-
-                var temp = data.temperature || '--';
-                var time = data.datetime || '---- -- -- --:--:--';
-                var tz = data.timezone || '';
-
-                box.querySelector('.dn-runtime-temp').textContent = 'CPU ' + temp + '°C';
-                box.querySelector('.dn-runtime-time').textContent = time + (tz ? ' ' + tz : '');
-                setLevel(box, temp);
-                box.classList.remove('dn-runtime-offline');
-              })
-              .catch(function() {
-                box.classList.add('dn-runtime-offline');
-              });
-            }
-
-            function start() {
-              makeMonitor();
-              update();
-              window.setInterval(update, 5000);
-            }
-
-            if (document.readyState === 'loading')
-              document.addEventListener('DOMContentLoaded', start);
-            else
-              start();
-          })();
-          EOF
-
-          cat > files/www/luci-static/doornet2/runtime-monitor.css <<'EOF'
-          #dn-runtime-monitor {
-            position: fixed;
-            top: 10px;
-            right: 76px;
-            z-index: 10020;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            min-height: 26px;
-            padding: 0 9px;
-            border: 1px solid rgba(127,127,127,.24);
-            border-radius: 7px;
-            background: rgba(30,30,30,.88);
-            color: #f3f4f6;
-            box-shadow: 0 1px 4px rgba(0,0,0,.18);
-            font-size: 11px;
-            line-height: 1;
-            white-space: nowrap;
-            pointer-events: none;
-            backdrop-filter: blur(6px);
-          }
-
-          #dn-runtime-monitor .dn-runtime-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #62d394;
-          }
-
-          #dn-runtime-monitor.dn-temp-warm .dn-runtime-dot {
-            background: #f0b35a;
-          }
-
-          #dn-runtime-monitor.dn-temp-hot .dn-runtime-dot {
-            background: #ff6b6b;
-          }
-
-          #dn-runtime-monitor.dn-runtime-offline {
-            opacity: .55;
-          }
-
-          #dn-runtime-monitor .dn-runtime-sep {
-            opacity: .45;
-          }
-
-          @media (max-width: 900px) {
-            #dn-runtime-monitor {
-              top: auto;
-              right: 10px;
-              bottom: 58px;
-              max-width: calc(100vw - 20px);
-            }
-          }
-          EOF
-
-          python3 - <<'PY2'
-          from pathlib import Path
-
-          headers = [
-              Path('package/lean/luci-theme-design/luasrc/view/themes/design/header.htm'),
-              Path('package/lean/luci-theme-argon/luasrc/view/themes/argon/header.htm'),
-          ]
-
-          css = '<link rel="stylesheet" href="/luci-static/doornet2/runtime-monitor.css">'
-          js = '<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
-
-          patched = 0
-
-          for p in headers:
-              if not p.exists():
-                  continue
-
-              text = p.read_text(errors='ignore')
-              old = text
-
-              inject = []
-              if css not in text:
-                  inject.append(css)
-              if js not in text:
-                  inject.append(js)
-
-              if inject:
-                  if '</head>' not in text:
-                      raise SystemExit('ERROR: theme header has no </head>: %s' % p)
-                  text = text.replace(
-                      '</head>',
-                      '\n'.join('\t' + x for x in inject) + '\n</head>',
-                      1
-                  )
-
-              if text != old:
-                  p.write_text(text)
-                  patched += 1
-                  print('patched runtime monitor header:', p)
-
-          design = Path('package/lean/luci-theme-design/luasrc/view/themes/design/header.htm')
-          final = design.read_text(errors='ignore')
-
-          if css not in final or js not in final:
-              raise SystemExit('ERROR: Design header monitor injection failed')
-
-          print('runtime monitor source headers patched:', patched)
-          PY2
-
-          cat > files/etc/uci-defaults/99-doornet2-runtime-header-fix <<'EOF'
-          #!/bin/sh
-
-          CSS='<link rel="stylesheet" href="/luci-static/doornet2/runtime-monitor.css">'
-          JS='<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
-
-          patch_header()
-          {
-              local hdr="$1"
-              [ -f "$hdr" ] || return 0
-
-              # Design/Argon packages may install a fresh header after the
-              # source-tree patch step. Patch the ACTUAL installed file here.
-              if ! grep -q 'runtime-monitor.css' "$hdr"; then
-                  sed -i "\|</head>|i\\$CSS" "$hdr"
-              fi
-
-              if ! grep -q 'runtime-monitor.js' "$hdr"; then
-                  sed -i "\|</head>|i\\$JS" "$hdr"
-              fi
-          }
 
           DESIGN_HDR="/usr/lib/lua/luci/view/themes/design/header.htm"
-          ARGON_HDR="/usr/lib/lua/luci/view/themes/argon/header.htm"
 
-          patch_header "$DESIGN_HDR"
-          patch_header "$ARGON_HDR"
-
-          # Make the Design theme's home shortcut open QuickStart on the
-          # actually installed header too. This is intentionally idempotent.
           if [ -f "$DESIGN_HDR" ]; then
               sed -i \
                 's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
@@ -911,8 +631,8 @@ jobs:
           exit 0
           EOF
 
-          chmod 755 files/etc/uci-defaults/99-doornet2-runtime-header-fix
-          sh -n files/etc/uci-defaults/99-doornet2-runtime-header-fix
+          chmod 755 files/etc/uci-defaults/99-doornet2-design-header-fix
+          sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
 
           cat > files/etc/uci-defaults/98-doornet2-time <<'EOF'
           #!/bin/sh
@@ -948,17 +668,14 @@ jobs:
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R34 RUNTIME MONITOR FILES ====="
-          test -x files/usr/bin/doornet2-runtime-status
-          test -s files/usr/lib/lua/luci/controller/doornet2_runtime.lua
-          test -s files/www/luci-static/doornet2/runtime-monitor.js
-          test -s files/www/luci-static/doornet2/runtime-monitor.css
+          echo "===== R1 UI/TIME FILES ====="
           test -x files/etc/uci-defaults/98-doornet2-time
-          test -x files/etc/uci-defaults/99-doornet2-runtime-header-fix
-          grep -q 'runtime-monitor.css' \
-            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-          grep -q 'runtime-monitor.js' \
-            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          test -x files/etc/uci-defaults/99-doornet2-design-header-fix
+
+          if find files -type f -print0 | xargs -0 grep -Il 'runtime-monitor\.js\|runtime-monitor\.css' 2>/dev/null | grep -q .; then
+              echo "ERROR: floating runtime monitor references unexpectedly remain in files/."
+              exit 1
+          fi
 
 
       # ============================================================
@@ -1259,6 +976,7 @@ jobs:
 
           cat > files/etc/doornet2_release <<EOF
           DOORNET2_VERSION='${DOORNET2_VERSION}'
+          DOORNET2_RELEASE='R1'
           DOORNET2_TAG='${DOORNET2_TAG}'
           DOORNET2_BUILD_DATE='${DOORNET2_BUILD_DATE}'
           DOORNET2_GIT_COMMIT='${GITHUB_SHA}'
@@ -1272,7 +990,7 @@ jobs:
           DOORNET2_UI='quickstart-design-dark-v1'
           DOORNET2_PASSWALL='builtin-online-feed-v1'
           DOORNET2_NETWORK_APPS='smartdns-uu-runtime-adguard-online-v2'
-          DOORNET2_RUNTIME_MONITOR='thermal-time-v2'
+          DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           EOF
 
           cat files/etc/doornet2_release
@@ -3444,7 +3162,7 @@ jobs:
 
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
-          FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|simple-obfs|tcping|v2ray-geoip|v2ray-geosite|xray-core|xray-plugin)$'
+          FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|ipt2socks|microsocks|tcping|xray-core)$'
 
           json_escape()
           {
@@ -3731,7 +3449,7 @@ jobs:
                       LABEL='PassWall 代理分流'
                       MAIN='luci-app-passwall'
                       SERVICE='passwall'
-                      FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|simple-obfs|tcping|v2ray-geoip|v2ray-geosite|xray-core|xray-plugin)$'
+                      FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|ipt2socks|microsocks|tcping|xray-core)$'
                       ;;
                   smartdns)
                       LABEL='SmartDNS DNS 加速'
@@ -4120,41 +3838,55 @@ jobs:
           CONFIG_PACKAGE_luci-compat=y
 
           # PassWall (official Openwrt-Passwall feeds)
-          # Use nftables transparent proxy on firewall4 and keep the common
-          # userland cores in the firmware so later online package updates do
-          # not depend on third-party kernel modules.
+          # DoorNet2 stable tree uses firewall3 + legacy iptables.
+          # R1 keeps only the Xray core and explicitly includes the IPv4/IPv6
+          # legacy xtables dependencies needed by PassWall.
           # CONFIG_PACKAGE_dnsmasq is not set
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
-          CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+
+          # DoorNet2/RK3399 stable tree uses firewall3 + legacy iptables.
+          # R34 accidentally selected the nftables option even though fw4/nft
+          # were absent. R1 explicitly selects the matching iptables backend.
+          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
+          # CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set
+
+          # Explicit IPv4/IPv6 legacy xtables userspace + kernel support.
+          # This prevents PassWall's ip6tables helper variable from becoming
+          # empty and producing the observed "-w: not found" startup failure.
+          CONFIG_PACKAGE_iptables=y
+          CONFIG_PACKAGE_iptables-zz-legacy=y
+          CONFIG_PACKAGE_ip6tables-zz-legacy=y
+          CONFIG_PACKAGE_kmod-ip6tables=y
+
+          # R1 keeps PassWall intentionally lean: Xray only.
+          # This avoids optional cores/plugins that either need newer Go/Rust
+          # toolchains or previously failed on this legacy LEDE/RK3399 tree.
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy is not set
 
-          # DoorNet2 R34 Go compatibility policy:
-          # Keep Xray as the main PassWall core, pinned above to 25.1.30
-          # (compatible with this tree's Go 1.23.1).
-          # Current Sing-box 1.14.0 and v2ray-plugin 5.49.0 require Go 1.25.5,
-          # so explicitly keep both out of this stable firmware.
-          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set
-          # CONFIG_PACKAGE_sing-box is not set
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
-
-          # Rust-based Shadowsocks client is disabled on DoorNet2.
-          # The current legacy LEDE buildroot fails while building rust/host.
-          # Xray remains enabled for modern proxy nodes.
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Server is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server is not set
-
-          # Legacy ShadowsocksR libev client is also disabled on DoorNet2.
-          # Current PassWall feed package shadowsocksr-libev 2.5.6 reaches the
-          # build stage without a generated Makefile on this legacy LEDE tree.
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server is not set
 
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
-
-          # v2ray-plugin 5.49.0 requires Go 1.25.5; keep it disabled.
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set
+          # CONFIG_PACKAGE_sing-box is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan_Plus is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_tuic_client is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set
           # CONFIG_PACKAGE_v2ray-plugin is not set
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
+
+          # Xray 25.1.30 is the sole proxy core in R1.
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
 
           # DNS acceleration / game acceleration / DNS filtering
           # Installed by default but kept disabled on first boot to avoid
@@ -4245,13 +3977,25 @@ jobs:
           grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
           grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set$' .config
+
+          grep -q '^CONFIG_PACKAGE_iptables=y$' .config
+          grep -q '^CONFIG_PACKAGE_iptables-zz-legacy=y$' .config
+          grep -q '^CONFIG_PACKAGE_ip6tables-zz-legacy=y$' .config
+          grep -q '^CONFIG_PACKAGE_kmod-ip6tables=y$' .config
+
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Server is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan_Plus is not set$' .config
 
           if grep -q '^CONFIG_PACKAGE_sing-box=y$' .config; then
               echo 'ERROR: sing-box unexpectedly selected; current 1.14.0 requires Go >= 1.25.5.'
@@ -4353,7 +4097,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R34 guard: the obsolete fixed-download UU package must not appear
+          # R1 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4533,13 +4277,14 @@ jobs:
             "tf_capacity": "preserve-expanded-root-v1",
             "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2",
             "ui": "quickstart-design-dark-v1",
-            "runtime_monitor": "thermal-time-v2"
+            "runtime_monitor": "cpu-temp-status-only-v1",
+            "release": "R1"
           }
           EOF
 
 
           cat > release-notes.md <<EOF
-          # DoorNet2 OpenWrt ${DOORNET2_VERSION}
+          # DoorNet2 OpenWrt R1 (${DOORNET2_VERSION})
 
           R18 storage layout:
 
@@ -4573,14 +4318,23 @@ jobs:
           - ext4 is automatically grown back to the existing TF p2 size
           - eMMC keeps the original Rockchip upgrade behaviour
 
-          R33 interface:
+          R1 stable interface:
 
           - Design theme is the default LuCI shell
           - QuickStart remains the iStoreOS-style home/workflow page
           - Design dark mode is enabled by default
           - Argon and Bootstrap remain installed as recovery themes
-          - CPU temperature + router date/time use a separate theme-independent badge
-          - Installed theme headers are patched on first boot as a safety net
+          - The top-right floating CPU/date/time badge is removed
+          - CPU temperature remains available in the normal system/CPU status line
+          - Timezone/NTP remain configured for Asia/Shanghai
+
+          R1 PassWall compatibility:
+
+          - PassWall is pinned to 25.1.15-1
+          - Xray is pinned to 25.1.30 for the Go 1.23 buildroot
+          - firewall3/iptables transparent proxy backend is selected
+          - IPv6 legacy iptables userspace and kernel support are included
+          - Xray is the only built-in proxy core; optional legacy/newer cores remain disabled
 
           Online-updatable network applications:
 
@@ -4818,7 +4572,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R34 Design UI + QuickStart + online apps + runtime monitor build finished"
+          echo "DoorNet2 R1 stable build finished"
           echo "========================================"
 
           echo
@@ -4919,7 +4673,14 @@ jobs:
           grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
           grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set$' .config
+
+          grep -q '^CONFIG_PACKAGE_iptables=y$' .config
+          grep -q '^CONFIG_PACKAGE_iptables-zz-legacy=y$' .config
+          grep -q '^CONFIG_PACKAGE_ip6tables-zz-legacy=y$' .config
+          grep -q '^CONFIG_PACKAGE_kmod-ip6tables=y$' .config
+
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set$' .config
@@ -4946,6 +4707,44 @@ jobs:
 
           test -f feeds/passwall_luci/luci-app-passwall/Makefile
           test -d feeds/passwall_packages
+
+          grep -q '^PKG_VERSION:=25\.1\.15$' \
+            feeds/passwall_luci/luci-app-passwall/Makefile
+          grep -q '^PKG_RELEASE:=1$' \
+            feeds/passwall_luci/luci-app-passwall/Makefile
+
+          PASSWALL_IPK="$(
+            find ./bin               -type f               -name 'luci-app-passwall_25.1.15-*.ipk'               -print               | head -n 1
+          )"
+
+          if [ -z "$PASSWALL_IPK" ]; then
+              echo "ERROR: pinned PassWall 25.1.15-1 IPK was not generated."
+              find ./bin -type f -name 'luci-app-passwall_*.ipk' -print | head -20
+              exit 1
+          fi
+
+          XRAY_IPK="$(
+            find ./bin               -type f               -name 'xray-core_25.1.30-*.ipk'               | head -n 1
+          )"
+
+          test -n "$XRAY_IPK"
+
+          IP6T_IPK="$(
+            find ./bin               -type f               -name 'ip6tables-zz-legacy_*.ipk'               | head -n 1
+          )"
+
+          KMOD_IP6T_IPK="$(
+            find ./bin               -type f               -name 'kmod-ip6tables_*.ipk'               | head -n 1
+          )"
+
+          test -n "$IP6T_IPK"
+          test -n "$KMOD_IP6T_IPK"
+
+          echo "PassWall package : $PASSWALL_IPK"
+          echo "Xray package     : $XRAY_IPK"
+          echo "IPv6 xtables     : $IP6T_IPK"
+          echo "IPv6 kernel kmod : $KMOD_IP6T_IPK"
+
           test -x files/usr/bin/doornet2-passwall-updater
           sh -n files/usr/bin/doornet2-passwall-updater
 
@@ -5001,7 +4800,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R34 DESIGN + QUICKSTART UI ====="
+          echo "===== R1 DESIGN + QUICKSTART UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-design-dark-v1'" \
@@ -5058,16 +4857,6 @@ jobs:
               exit 1
           fi
 
-          echo "Installed Design header: $ROOT_DESIGN_HEADER"
-
-          # R33 demonstrated an important packaging detail:
-          # luci-theme-design installs a fresh header into rootfs, so it may not
-          # contain our source-tree injection yet. That is expected. What must
-          # be true is:
-          #   1. the real installed header is present and patchable;
-          #   2. the runtime CSS/JS are present in the real rootfs;
-          #   3. the first-boot fixer is present in the real rootfs;
-          #   4. the fixer can transform a copy of the installed header.
           grep -q '</head>' "$ROOT_DESIGN_HEADER"
 
           ROOT_DESIGN_CSS="$(
@@ -5083,28 +4872,10 @@ jobs:
               exit 1
           fi
 
-          echo "Installed Design CSS: $ROOT_DESIGN_CSS"
-
-          ROOT_RUNTIME_CSS="$(
-            find build_dir \
-              -type f \
-              -path '*/root-*/www/luci-static/doornet2/runtime-monitor.css' \
-              -print \
-              | head -n 1
-          )"
-
-          ROOT_RUNTIME_JS="$(
-            find build_dir \
-              -type f \
-              -path '*/root-*/www/luci-static/doornet2/runtime-monitor.js' \
-              -print \
-              | head -n 1
-          )"
-
           ROOT_HEADER_FIX="$(
             find build_dir \
               -type f \
-              -path '*/root-*/etc/uci-defaults/99-doornet2-runtime-header-fix' \
+              -path '*/root-*/etc/uci-defaults/99-doornet2-design-header-fix' \
               -print \
               | head -n 1
           )"
@@ -5117,96 +4888,42 @@ jobs:
               | head -n 1
           )"
 
-          test -n "$ROOT_RUNTIME_CSS"
-          test -n "$ROOT_RUNTIME_JS"
           test -n "$ROOT_HEADER_FIX"
           test -n "$ROOT_UI_DEFAULT"
 
-          echo "Installed runtime CSS: $ROOT_RUNTIME_CSS"
-          echo "Installed runtime JS : $ROOT_RUNTIME_JS"
-          echo "Installed header fix : $ROOT_HEADER_FIX"
-          echo "Installed UI default : $ROOT_UI_DEFAULT"
-
-          grep -q '#dn-runtime-monitor' "$ROOT_RUNTIME_CSS"
-          grep -q 'doornet2_runtime' "$ROOT_RUNTIME_JS"
-
           sh -n "$ROOT_HEADER_FIX"
           grep -q 'themes/design/header.htm' "$ROOT_HEADER_FIX"
-          grep -q 'runtime-monitor.css' "$ROOT_HEADER_FIX"
-          grep -q 'runtime-monitor.js' "$ROOT_HEADER_FIX"
           grep -q '/cgi-bin/luci/admin/quickstart/' "$ROOT_HEADER_FIX"
 
           sh -n "$ROOT_UI_DEFAULT"
           grep -q "mediaurlbase='/luci-static/design'" "$ROOT_UI_DEFAULT"
 
-          echo "===== SIMULATE FIRST-BOOT DESIGN HEADER PATCH ====="
+          echo "===== VERIFY FLOATING BADGE REMOVED ====="
 
-          TMP_DESIGN_HEADER="$(mktemp)"
-          cp -f "$ROOT_DESIGN_HEADER" "$TMP_DESIGN_HEADER"
+          ! grep -Rqs 'runtime-monitor.css' files package/lean/luci-theme-design 2>/dev/null
+          ! grep -Rqs 'runtime-monitor.js' files package/lean/luci-theme-design 2>/dev/null
+          ! grep -Rqs 'dn-runtime-monitor' files package/lean/luci-theme-design 2>/dev/null
 
-          TEST_CSS='<link rel="stylesheet" href="/luci-static/doornet2/runtime-monitor.css">'
-          TEST_JS='<script defer src="/luci-static/doornet2/runtime-monitor.js"></script>'
-
-          if ! grep -q 'runtime-monitor.css' "$TMP_DESIGN_HEADER"; then
-              sed -i "\|</head>|i\\$TEST_CSS" "$TMP_DESIGN_HEADER"
-          fi
-
-          if ! grep -q 'runtime-monitor.js' "$TMP_DESIGN_HEADER"; then
-              sed -i "\|</head>|i\\$TEST_JS" "$TMP_DESIGN_HEADER"
-          fi
-
-          sed -i \
-            's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
-            "$TMP_DESIGN_HEADER"
-
-          grep -q 'runtime-monitor.css' "$TMP_DESIGN_HEADER"
-          grep -q 'runtime-monitor.js' "$TMP_DESIGN_HEADER"
-
-          rm -f "$TMP_DESIGN_HEADER"
-
-          echo "Installed Design header is patchable; first-boot fix verified (OK)"
+          echo "Floating CPU/date/time badge removed (OK)"
 
 
           echo
-          echo "===== R34 RUNTIME MONITOR ====="
+          echo "===== R1 TIME / CPU TEMP POLICY ====="
 
           grep -q \
-            "DOORNET2_RUNTIME_MONITOR='thermal-time-v2'" \
+            "DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'" \
             files/etc/doornet2_release
-
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set$' .config
-          ! grep -Eq '^CONFIG_PACKAGE_shadowsocks-rust-.*=y$' .config
-          ! grep -Eq '^CONFIG_PACKAGE_shadowsocksr-libev.*=y$' .config
-
-          test -x files/usr/bin/doornet2-runtime-status
-          sh -n files/usr/bin/doornet2-runtime-status
-
-          test -s files/usr/lib/lua/luci/controller/doornet2_runtime.lua
-          grep -q 'doornet2_runtime' \
-            files/usr/lib/lua/luci/controller/doornet2_runtime.lua
-
-          test -s files/www/luci-static/doornet2/runtime-monitor.js
-          grep -q 'doornet2_runtime' \
-            files/www/luci-static/doornet2/runtime-monitor.js
-
-          test -s files/www/luci-static/doornet2/runtime-monitor.css
-          grep -q '#dn-runtime-monitor' \
-            files/www/luci-static/doornet2/runtime-monitor.css
-
-          grep -q 'runtime-monitor.css' \
-            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-          grep -q 'runtime-monitor.js' \
-            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-
-          test -x files/etc/uci-defaults/99-doornet2-runtime-header-fix
-          sh -n files/etc/uci-defaults/99-doornet2-runtime-header-fix
 
           test -x files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
           grep -q "zonename='Asia/Shanghai'" \
             files/etc/uci-defaults/98-doornet2-time
+
+          test -x files/etc/uci-defaults/99-doornet2-design-header-fix
+          sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
+
+          # Thermal support is intentionally left to the existing RK3399/
+          # LuCI status stack. R1 adds no floating monitor frontend.
 
 
           echo
@@ -5233,5 +4950,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R34 DESIGN UI + QUICKSTART + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
+          echo "R1 STABLE + PASSWALL + DESIGN + ONLINE APPS + CAPACITY PATCH SUCCESS"
           echo "========================================"
