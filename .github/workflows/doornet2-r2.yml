@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R1
+name: DoorNet2-OpenWrt-iStore-R2
 
 on:
   workflow_dispatch:
@@ -130,8 +130,8 @@ jobs:
           SHORT_SHA="${GITHUB_SHA:0:7}"
 
           # DoorNet2 public/stable numbering restarts here.
-          # R1 -> R2 -> R3... is bumped manually in this workflow.
-          RELEASE_NUM="1"
+          # R2 -> R3 -> R4... is bumped manually in this workflow.
+          RELEASE_NUM="2"
 
           VERSION="${BUILD_DAY}-r${RELEASE_NUM}-${SHORT_SHA}"
           TAG="doornet2-${VERSION}"
@@ -222,13 +222,23 @@ jobs:
           grep -q '^PKG_RELEASE:=1$' \
             feeds/passwall_luci/luci-app-passwall/Makefile
 
-          # R1 is an iptables/firewall3 build. Ensure the pinned PassWall source
-          # actually contains the legacy iptables backend and its expected
-          # dependency declaration before we spend hours compiling.
-          grep -q 'Iptables Transparent Proxy' \
-            feeds/passwall_luci/luci-app-passwall/Makefile
-          grep -q 'select PACKAGE_iptables-zz-legacy' \
-            feeds/passwall_luci/luci-app-passwall/Makefile
+          # R2 is an iptables/firewall3 build. This legacy LEDE tree already
+          # ships xtables-legacy as the normal `iptables` package and does NOT
+          # define the newer OpenWrt package name `iptables-zz-legacy`.
+          # Patch only that dependency name; PassWall still uses its normal
+          # iptables backend and runtime scripts.
+          PASSWALL_MK="feeds/passwall_luci/luci-app-passwall/Makefile"
+
+          grep -q 'Iptables Transparent Proxy' "$PASSWALL_MK"
+
+          sed -i \
+            '/^[[:space:]]*select PACKAGE_iptables-zz-legacy[[:space:]]*$/d' \
+            "$PASSWALL_MK"
+
+          if grep -q 'select PACKAGE_iptables-zz-legacy' "$PASSWALL_MK"; then
+              echo "ERROR: incompatible iptables-zz-legacy dependency remains."
+              exit 1
+          fi
 
           # Refresh the active package symlink after checking out the tag.
           rm -rf package/feeds/passwall_luci/luci-app-passwall
@@ -259,7 +269,7 @@ jobs:
           #   v2ray-plugin 5.49.0 -> Go >= 1.25.5
           #   current Xray        -> newer Go toolchain
           #
-          # DoorNet2 R1 pairs PassWall 25.1.15-1 with Xray 25.1.30,
+          # DoorNet2 R2 pairs PassWall 25.1.15-1 with Xray 25.1.30,
           # a compatible 2025-era combination. Xray 25.1.30 uses Go 1.23,
           # while Sing-box/v2ray-plugin from the current packages feed require
           # newer Go toolchains, so those remain disabled.
@@ -497,7 +507,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R1 UI policy:
+          # DoorNet2 R2 UI policy:
           # Design default + QuickStart home, with Argon/Bootstrap recovery.
 
           uci -q set luci.themes.Design='/luci-static/design'
@@ -529,7 +539,7 @@ jobs:
                   option navbar_proxy 'passwall'
           EOF
 
-          echo "===== R1 UI DEFAULTS ====="
+          echo "===== R2 UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
           cat files/etc/config/design
 
@@ -543,7 +553,7 @@ jobs:
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R1 ships the network apps but keeps them disabled on a clean boot
+          # DoorNet2 R2 ships the network apps but keeps them disabled on a clean boot
           # so no credentials or DNS ownership are silently imposed.
           # The validated topology is:
           #   dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
@@ -565,7 +575,7 @@ jobs:
 
 
       # ============================================================
-      # 4. R1 UI strategy
+      # 4. R2 UI strategy
       #
       # Use the native Design theme for the whole shell.
       # No global Argon "fake iStoreOS" stylesheet is injected.
@@ -575,7 +585,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== VERIFY R1 DESIGN UI SOURCE ====="
+          echo "===== VERIFY R2 DESIGN UI SOURCE ====="
 
           test -f package/lean/luci-theme-design/Makefile
           test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
@@ -595,15 +605,15 @@ jobs:
 
 
       # ============================================================
-      # 4A. R1 time + Design first-boot fix
+      # 4A. R2 time + Design first-boot fix
       #
-      # R1 intentionally removes the floating CPU/date/time badge.
+      # R2 intentionally removes the floating CPU/date/time badge.
       # RK3399 thermal support remains untouched, so the normal LuCI
       # system/CPU information line can continue to display temperature.
       # Timezone/NTP also remain configured.
       # ============================================================
 
-      - name: Add DoorNet2 R1 time and Design first-boot fix
+      - name: Add DoorNet2 R2 time and Design first-boot fix
         run: |
           set -e
 
@@ -668,7 +678,7 @@ jobs:
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R1 UI/TIME FILES ====="
+          echo "===== R2 UI/TIME FILES ====="
           test -x files/etc/uci-defaults/98-doornet2-time
           test -x files/etc/uci-defaults/99-doornet2-design-header-fix
 
@@ -976,7 +986,7 @@ jobs:
 
           cat > files/etc/doornet2_release <<EOF
           DOORNET2_VERSION='${DOORNET2_VERSION}'
-          DOORNET2_RELEASE='R1'
+          DOORNET2_RELEASE='R2'
           DOORNET2_TAG='${DOORNET2_TAG}'
           DOORNET2_BUILD_DATE='${DOORNET2_BUILD_DATE}'
           DOORNET2_GIT_COMMIT='${GITHUB_SHA}'
@@ -3839,7 +3849,7 @@ jobs:
 
           # PassWall (official Openwrt-Passwall feeds)
           # DoorNet2 stable tree uses firewall3 + legacy iptables.
-          # R1 keeps only the Xray core and explicitly includes the IPv4/IPv6
+          # R2 keeps only the Xray core and explicitly includes the IPv4/IPv6
           # legacy xtables dependencies needed by PassWall.
           # CONFIG_PACKAGE_dnsmasq is not set
           CONFIG_PACKAGE_dnsmasq-full=y
@@ -3848,19 +3858,19 @@ jobs:
 
           # DoorNet2/RK3399 stable tree uses firewall3 + legacy iptables.
           # R34 accidentally selected the nftables option even though fw4/nft
-          # were absent. R1 explicitly selects the matching iptables backend.
+          # were absent. R2 explicitly selects the matching iptables backend.
           CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
           # CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set
 
           # Explicit IPv4/IPv6 legacy xtables userspace + kernel support.
-          # This prevents PassWall's ip6tables helper variable from becoming
-          # empty and producing the observed "-w: not found" startup failure.
+          # In this LEDE tree the normal `iptables` and `ip6tables` packages
+          # install the legacy xtables binaries. There are no *-zz-legacy
+          # package symbols here.
           CONFIG_PACKAGE_iptables=y
-          CONFIG_PACKAGE_iptables-zz-legacy=y
-          CONFIG_PACKAGE_ip6tables-zz-legacy=y
+          CONFIG_PACKAGE_ip6tables=y
           CONFIG_PACKAGE_kmod-ip6tables=y
 
-          # R1 keeps PassWall intentionally lean: Xray only.
+          # R2 keeps PassWall intentionally lean: Xray only.
           # This avoids optional cores/plugins that either need newer Go/Rust
           # toolchains or previously failed on this legacy LEDE/RK3399 tree.
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
@@ -3885,7 +3895,7 @@ jobs:
           # CONFIG_PACKAGE_v2ray-plugin is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
 
-          # Xray 25.1.30 is the sole proxy core in R1.
+          # Xray 25.1.30 is the sole proxy core in R2.
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
 
           # DNS acceleration / game acceleration / DNS filtering
@@ -3974,28 +3984,51 @@ jobs:
             '^CONFIG_PACKAGE_(luci-app-passwall|luci-i18n-passwall-zh-cn|dnsmasq-full)=y$' \
             .config || true
 
+          echo "===== PASSWALL BACKEND / CORE SYMBOLS ====="
+          grep -E \
+            '^(CONFIG_PACKAGE_(luci-app-passwall(_.*)?|iptables|ip6tables|kmod-ip6tables|firewall4)=|# CONFIG_PACKAGE_(luci-app-passwall_.*|firewall4) is not set)' \
+            .config || true
+
           grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
           grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set$' .config
+
+          if ! grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config; then
+              echo "ERROR: PassWall iptables backend was not selected."
+              grep -E 'luci-app-passwall_.*Transparent_Proxy|CONFIG_PACKAGE_firewall4' .config || true
+              exit 1
+          fi
+
+          if grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config; then
+              echo "ERROR: PassWall nftables backend was unexpectedly selected."
+              exit 1
+          fi
 
           grep -q '^CONFIG_PACKAGE_iptables=y$' .config
-          grep -q '^CONFIG_PACKAGE_iptables-zz-legacy=y$' .config
-          grep -q '^CONFIG_PACKAGE_ip6tables-zz-legacy=y$' .config
+          grep -q '^CONFIG_PACKAGE_ip6tables=y$' .config
           grep -q '^CONFIG_PACKAGE_kmod-ip6tables=y$' .config
 
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Server is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan_Plus is not set$' .config
+
+          # Optional cores only need to be absent; Kconfig may either emit an
+          # explicit '# ... is not set' line or omit a hidden symbol entirely.
+          for sym in \
+            SingBox \
+            V2ray_Plugin \
+            Geoview \
+            Haproxy \
+            Shadowsocks_Libev_Client \
+            Shadowsocks_Libev_Server \
+            Shadowsocks_Rust_Client \
+            ShadowsocksR_Libev_Client \
+            Simple_Obfs \
+            Trojan_Plus
+          do
+              if grep -q "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_${sym}=y$" .config; then
+                  echo "ERROR: unwanted PassWall optional core selected: ${sym}"
+                  exit 1
+              fi
+          done
 
           if grep -q '^CONFIG_PACKAGE_sing-box=y$' .config; then
               echo 'ERROR: sing-box unexpectedly selected; current 1.14.0 requires Go >= 1.25.5.'
@@ -4097,7 +4130,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R1 guard: the obsolete fixed-download UU package must not appear
+          # R2 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4278,13 +4311,13 @@ jobs:
             "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2",
             "ui": "quickstart-design-dark-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
-            "release": "R1"
+            "release": "R2"
           }
           EOF
 
 
           cat > release-notes.md <<EOF
-          # DoorNet2 OpenWrt R1 (${DOORNET2_VERSION})
+          # DoorNet2 OpenWrt R2 (${DOORNET2_VERSION})
 
           R18 storage layout:
 
@@ -4318,7 +4351,7 @@ jobs:
           - ext4 is automatically grown back to the existing TF p2 size
           - eMMC keeps the original Rockchip upgrade behaviour
 
-          R1 stable interface:
+          R2 stable interface:
 
           - Design theme is the default LuCI shell
           - QuickStart remains the iStoreOS-style home/workflow page
@@ -4328,12 +4361,12 @@ jobs:
           - CPU temperature remains available in the normal system/CPU status line
           - Timezone/NTP remain configured for Asia/Shanghai
 
-          R1 PassWall compatibility:
+          R2 PassWall compatibility:
 
           - PassWall is pinned to 25.1.15-1
           - Xray is pinned to 25.1.30 for the Go 1.23 buildroot
           - firewall3/iptables transparent proxy backend is selected
-          - IPv6 legacy iptables userspace and kernel support are included
+          - Native LEDE ip6tables userspace and kmod-ip6tables support are included
           - Xray is the only built-in proxy core; optional legacy/newer cores remain disabled
 
           Online-updatable network applications:
@@ -4572,7 +4605,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R1 stable build finished"
+          echo "DoorNet2 R2 stable build finished"
           echo "========================================"
 
           echo
@@ -4674,11 +4707,10 @@ jobs:
           grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
           grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set$' .config
+          ! grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config
 
           grep -q '^CONFIG_PACKAGE_iptables=y$' .config
-          grep -q '^CONFIG_PACKAGE_iptables-zz-legacy=y$' .config
-          grep -q '^CONFIG_PACKAGE_ip6tables-zz-legacy=y$' .config
+          grep -q '^CONFIG_PACKAGE_ip6tables=y$' .config
           grep -q '^CONFIG_PACKAGE_kmod-ip6tables=y$' .config
 
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
@@ -4742,7 +4774,7 @@ jobs:
 
           echo "PassWall package : $PASSWALL_IPK"
           echo "Xray package     : $XRAY_IPK"
-          echo "IPv6 xtables     : $IP6T_IPK"
+          echo "IPv6 iptables    : $IP6T_IPK"
           echo "IPv6 kernel kmod : $KMOD_IP6T_IPK"
 
           test -x files/usr/bin/doornet2-passwall-updater
@@ -4800,7 +4832,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R1 DESIGN + QUICKSTART UI ====="
+          echo "===== R2 DESIGN + QUICKSTART UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-design-dark-v1'" \
@@ -4908,7 +4940,7 @@ jobs:
 
 
           echo
-          echo "===== R1 TIME / CPU TEMP POLICY ====="
+          echo "===== R2 TIME / CPU TEMP POLICY ====="
 
           grep -q \
             "DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'" \
@@ -4923,7 +4955,7 @@ jobs:
           sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
 
           # Thermal support is intentionally left to the existing RK3399/
-          # LuCI status stack. R1 adds no floating monitor frontend.
+          # LuCI status stack. R2 adds no floating monitor frontend.
 
 
           echo
@@ -4950,5 +4982,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R1 STABLE + PASSWALL + DESIGN + ONLINE APPS + CAPACITY PATCH SUCCESS"
+          echo "R2 STABLE + PASSWALL + DESIGN + ONLINE APPS + CAPACITY PATCH SUCCESS"
           echo "========================================"
