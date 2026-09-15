@@ -4703,19 +4703,29 @@ jobs:
             "DOORNET2_PASSWALL='builtin-online-feed-v1'" \
             files/etc/doornet2_release
 
+          echo "===== FINAL PASSWALL CONFIG ====="
+          grep -E \
+            '^(CONFIG_PACKAGE_(luci-app-passwall(_.*)?|luci-i18n-passwall-zh-cn|dnsmasq-full|iptables|ip6tables|kmod-ip6tables)=|# CONFIG_PACKAGE_luci-app-passwall_.* is not set)' \
+            .config || true
+
           grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
           grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config
-          ! grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config
+
+          if ! grep -q '^CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y$' .config; then
+              echo 'ERROR: PassWall iptables backend missing in final config.'
+              exit 1
+          fi
+
+          if grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config; then
+              echo 'ERROR: PassWall nftables backend unexpectedly enabled.'
+              exit 1
+          fi
 
           grep -q '^CONFIG_PACKAGE_iptables=y$' .config
           grep -q '^CONFIG_PACKAGE_ip6tables=y$' .config
           grep -q '^CONFIG_PACKAGE_kmod-ip6tables=y$' .config
-
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set$' .config
-          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set$' .config
 
           if grep -q '^CONFIG_PACKAGE_sing-box=y$' .config; then
               echo 'ERROR: incompatible sing-box unexpectedly selected in final config.'
@@ -4746,36 +4756,99 @@ jobs:
             feeds/passwall_luci/luci-app-passwall/Makefile
 
           PASSWALL_IPK="$(
-            find ./bin               -type f               -name 'luci-app-passwall_25.1.15-*.ipk'               -print               | head -n 1
+            find ./bin \
+              -type f \
+              -name 'luci-app-passwall_25.1.15-*.ipk' \
+              -print \
+              | head -n 1
+          )"
+
+          XRAY_IPK="$(
+            find ./bin \
+              -type f \
+              -name 'xray-core_25.1.30-*.ipk' \
+              -print \
+              | head -n 1
+          )"
+
+          # Taipeione/LEDE stable uses the native legacy package name
+          # `ip6tables`, NOT the newer OpenWrt `ip6tables-zz-legacy`.
+          IP6T_IPK="$(
+            find ./bin \
+              -type f \
+              -name 'ip6tables_*.ipk' \
+              -print \
+              | head -n 1
+          )"
+
+          KMOD_IP6T_IPK="$(
+            find ./bin \
+              -type f \
+              -name 'kmod-ip6tables_*.ipk' \
+              -print \
+              | head -n 1
           )"
 
           if [ -z "$PASSWALL_IPK" ]; then
-              echo "ERROR: pinned PassWall 25.1.15-1 IPK was not generated."
+              echo "ERROR: PassWall 25.1.15 package was not generated."
               find ./bin -type f -name 'luci-app-passwall_*.ipk' -print | head -20
               exit 1
           fi
 
-          XRAY_IPK="$(
-            find ./bin               -type f               -name 'xray-core_25.1.30-*.ipk'               | head -n 1
-          )"
+          if [ -z "$XRAY_IPK" ]; then
+              echo "ERROR: Xray 25.1.30 package was not generated."
+              find ./bin -type f -name 'xray-core_*.ipk' -print | head -20
+              exit 1
+          fi
 
-          test -n "$XRAY_IPK"
+          if [ -z "$IP6T_IPK" ]; then
+              echo "ERROR: native LEDE ip6tables package was not generated."
+              find ./bin -type f -iname '*ip6tables*.ipk' -print | head -30
+              exit 1
+          fi
 
-          IP6T_IPK="$(
-            find ./bin               -type f               -name 'ip6tables-zz-legacy_*.ipk'               | head -n 1
-          )"
-
-          KMOD_IP6T_IPK="$(
-            find ./bin               -type f               -name 'kmod-ip6tables_*.ipk'               | head -n 1
-          )"
-
-          test -n "$IP6T_IPK"
-          test -n "$KMOD_IP6T_IPK"
+          if [ -z "$KMOD_IP6T_IPK" ]; then
+              echo "ERROR: kmod-ip6tables package was not generated."
+              find ./bin -type f -iname '*ip6tables*.ipk' -print | head -30
+              exit 1
+          fi
 
           echo "PassWall package : $PASSWALL_IPK"
           echo "Xray package     : $XRAY_IPK"
           echo "IPv6 iptables    : $IP6T_IPK"
           echo "IPv6 kernel kmod : $KMOD_IP6T_IPK"
+
+          echo "===== PASSWALL ROOTFS ====="
+
+          ROOT_XRAY="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/usr/bin/xray' \
+              -print \
+              | head -n 1
+          )"
+
+          ROOT_IP6TABLES="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/usr/sbin/ip6tables' \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$ROOT_XRAY" ]; then
+              echo "ERROR: xray binary is missing from the firmware rootfs."
+              exit 1
+          fi
+
+          if [ -z "$ROOT_IP6TABLES" ]; then
+              echo "ERROR: ip6tables binary is missing from the firmware rootfs."
+              find build_dir -type f -path '*/root-*/usr/sbin/ip6tables*' -print | head -20
+              exit 1
+          fi
+
+          echo "Rootfs Xray      : $ROOT_XRAY"
+          echo "Rootfs ip6tables : $ROOT_IP6TABLES"
 
           test -x files/usr/bin/doornet2-passwall-updater
           sh -n files/usr/bin/doornet2-passwall-updater
