@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R3
+name: DoorNet2-OpenWrt-iStore-R4
 
 on:
   workflow_dispatch:
@@ -130,8 +130,8 @@ jobs:
           SHORT_SHA="${GITHUB_SHA:0:7}"
 
           # DoorNet2 public/stable numbering restarts here.
-          # R3 -> R4 -> R5... is bumped manually in this workflow.
-          RELEASE_NUM="3"
+          # R4 -> R5 -> R6... is bumped manually in this workflow.
+          RELEASE_NUM="4"
 
           VERSION="${BUILD_DAY}-r${RELEASE_NUM}-${SHORT_SHA}"
           TAG="doornet2-${VERSION}"
@@ -222,7 +222,7 @@ jobs:
           grep -q '^PKG_RELEASE:=1$' \
             feeds/passwall_luci/luci-app-passwall/Makefile
 
-          # R3 is an iptables/firewall3 build. This legacy LEDE tree already
+          # R4 is an iptables/firewall3 build. This legacy LEDE tree already
           # ships xtables-legacy as the normal `iptables` package and does NOT
           # define the newer OpenWrt package name `iptables-zz-legacy`.
           # Patch only that dependency name; PassWall still uses its normal
@@ -237,6 +237,35 @@ jobs:
 
           if grep -q 'select PACKAGE_iptables-zz-legacy' "$PASSWALL_MK"; then
               echo "ERROR: incompatible iptables-zz-legacy dependency remains."
+              exit 1
+          fi
+
+          # DoorNet2 R4 FINAL owns the visible shunt framework through R4Shunt.
+          # Remove only PassWall's stock `myshunt` node from the packaged
+          # default config so a clean flash does not show two "分流总节点"
+          # entries. Keep PassWall's stock shunt-rule definitions intact.
+          PASSWALL_DEFAULT_CFG="feeds/passwall_luci/luci-app-passwall/root/usr/share/passwall/0_default_config"
+
+          test -f "$PASSWALL_DEFAULT_CFG"
+
+          awk '
+            BEGIN { skip = 0 }
+            /^config nodes '\''myshunt'\''$/ {
+                skip = 1
+                next
+            }
+            skip && /^config / {
+                skip = 0
+            }
+            !skip {
+                print
+            }
+          ' "$PASSWALL_DEFAULT_CFG" > "${PASSWALL_DEFAULT_CFG}.tmp"
+
+          mv "${PASSWALL_DEFAULT_CFG}.tmp" "$PASSWALL_DEFAULT_CFG"
+
+          if grep -q "^config nodes 'myshunt'$" "$PASSWALL_DEFAULT_CFG"; then
+              echo "ERROR: stock PassWall myshunt node still exists."
               exit 1
           fi
 
@@ -269,7 +298,7 @@ jobs:
           #   v2ray-plugin 5.49.0 -> Go >= 1.25.5
           #   current Xray        -> newer Go toolchain
           #
-          # DoorNet2 R3 pairs PassWall 25.1.15-1 with Xray 25.1.30,
+          # DoorNet2 R4 pairs PassWall 25.1.15-1 with Xray 25.1.30,
           # a compatible 2025-era combination. Xray 25.1.30 uses Go 1.23,
           # while Sing-box/v2ray-plugin from the current packages feed require
           # newer Go toolchains, so those remain disabled.
@@ -507,7 +536,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R3 UI policy:
+          # DoorNet2 R4 UI policy:
           # Design default + QuickStart home, with Argon/Bootstrap recovery.
 
           uci -q set luci.themes.Design='/luci-static/design'
@@ -539,43 +568,716 @@ jobs:
                   option navbar_proxy 'passwall'
           EOF
 
-          echo "===== R3 UI DEFAULTS ====="
+          echo "===== R4 UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
           cat files/etc/config/design
 
 
-      - name: Configure DNS and accelerator safe defaults
+      - name: Configure DoorNet2 R4 DNS and accelerator defaults
         run: |
           set -e
 
-          mkdir -p files/etc/uci-defaults
+          mkdir -p \
+            files/etc/uci-defaults \
+            files/etc/init.d
 
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R3 ships the network apps but keeps them disabled on a clean boot
-          # so no credentials or DNS ownership are silently imposed.
-          # The validated topology is:
+          # R4 validated DNS topology:
           #   dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
-          # SmartDNS tested upstreams: 223.5.5.5 and 119.29.29.29.
+          #
+          # Clean-install safety:
+          # - SmartDNS is prepared on :6053.
+          # - SmartDNS never auto-rewrites dnsmasq.
+          # - AdGuard keeps its normal first-run setup / user password flow.
+          # - dnsmasq remains untouched until AdGuard is actually listening
+          #   on :3053, so a clean flash never loses DNS.
 
-          for svc in smartdns adguardhome uuplugin; do
+          CUR_ENABLED="$(uci -q get smartdns.@smartdns[0].enabled)"
+          CUR_PORT="$(uci -q get smartdns.@smartdns[0].port)"
+
+          # Apply the DoorNet2 preset only to the package's clean/default state.
+          # Existing user SmartDNS configurations are left intact on retained
+          # sysupgrades.
+          if [ -z "$CUR_PORT" ] || \
+             { [ "$CUR_ENABLED" = "0" ] && [ "$CUR_PORT" = "53" ]; }
+          then
+              uci -q set smartdns.@smartdns[0].enabled='1'
+              uci -q set smartdns.@smartdns[0].port='6053'
+              uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
+
+              while uci -q delete smartdns.@server[0] >/dev/null 2>&1; do
+                  :
+              done
+
+              ALI="$(uci add smartdns server)"
+              uci -q set smartdns."$ALI".name='AliDNS'
+              uci -q set smartdns."$ALI".ip='223.5.5.5'
+              uci -q set smartdns."$ALI".port='53'
+
+              DNSPOD="$(uci add smartdns server)"
+              uci -q set smartdns."$DNSPOD".name='DNSPod'
+              uci -q set smartdns."$DNSPOD".ip='119.29.29.29'
+              uci -q set smartdns."$DNSPOD".port='53'
+
+              uci -q commit smartdns
+              CUR_PORT='6053'
+          fi
+
+          if [ "$CUR_PORT" = "6053" ] && [ -x /etc/init.d/smartdns ]; then
+              /etc/init.d/smartdns enable >/dev/null 2>&1 || true
+              /etc/init.d/smartdns restart >/dev/null 2>&1 || true
+          fi
+
+          # If AdGuard was retained from an earlier install, bring it back.
+          # Otherwise leave first-run setup untouched.
+          if [ -x /etc/init.d/adguardhome ]; then
+              if [ -s /etc/adguardhome.yaml ]; then
+                  /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
+                  /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
+              else
+                  /etc/init.d/adguardhome disable >/dev/null 2>&1 || true
+                  /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
+              fi
+          fi
+
+          # UU remains user-controlled. Do not change an existing setting.
+
+          if [ -x /etc/init.d/doornet2-dns-chain ]; then
+              /etc/init.d/doornet2-dns-chain enable >/dev/null 2>&1 || true
+              /etc/init.d/doornet2-dns-chain start >/dev/null 2>&1 || true
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/97-doornet2-network-apps
+          sh -n files/etc/uci-defaults/97-doornet2-network-apps
+
+          cat > files/etc/init.d/doornet2-dns-chain <<'EOF'
+          #!/bin/sh /etc/rc.common
+
+          START=98
+          STOP=12
+
+          LOG="/tmp/doornet2-dns-chain.log"
+
+          log_msg()
+          {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"
+          }
+
+          adguard_3053_ready()
+          {
+              netstat -lnptu 2>/dev/null \
+                | grep -E '[:.]3053[[:space:]]' \
+                >/dev/null 2>&1
+          }
+
+          activate_chain()
+          {
+              # Keep SmartDNS on the validated local upstream port.
+              if uci -q get smartdns.@smartdns[0] >/dev/null 2>&1; then
+                  uci -q set smartdns.@smartdns[0].enabled='1'
+                  uci -q set smartdns.@smartdns[0].port='6053'
+                  uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
+                  uci -q commit smartdns
+
+                  /etc/init.d/smartdns enable >/dev/null 2>&1 || true
+                  /etc/init.d/smartdns restart >/dev/null 2>&1 || true
+              fi
+
+              # PassWall transparent routing is kept separate from DNS.
+              if uci -q get passwall.@global[0] >/dev/null 2>&1; then
+                  uci -q set passwall.@global[0].dns_redirect='0'
+                  uci -q commit passwall
+              fi
+
+              uci -q delete dhcp.@dnsmasq[0].server
+              uci -q add_list dhcp.@dnsmasq[0].server='127.0.0.1#3053'
+              uci -q set dhcp.@dnsmasq[0].noresolv='1'
+              uci -q commit dhcp
+              /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+
+              log_msg "DNS chain active: dnsmasq:53 -> AdGuard:3053 -> SmartDNS:6053"
+          }
+
+          start()
+          {
+              (
+                  : >"$LOG"
+                  log_msg "R4 DNS-chain helper started"
+
+                  if [ -s /etc/adguardhome.yaml ] && [ -x /etc/init.d/adguardhome ]; then
+                      /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
+                      /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
+                  fi
+
+                  # First-run AdGuard setup may be completed after boot.
+                  # Watch for one hour and wire the chain as soon as :3053
+                  # becomes available.
+                  i=0
+                  while [ "$i" -lt 240 ]; do
+                      if adguard_3053_ready; then
+                          activate_chain
+                          exit 0
+                      fi
+
+                      if [ -s /etc/adguardhome.yaml ] && [ -x /etc/init.d/adguardhome ]; then
+                          /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
+                      fi
+
+                      sleep 15
+                      i=$((i + 1))
+                  done
+
+                  log_msg "AdGuard :3053 not detected; dnsmasq left unchanged"
+              ) &
+          }
+
+          stop()
+          {
+              :
+          }
+          EOF
+
+          chmod 755 files/etc/init.d/doornet2-dns-chain
+          sh -n files/etc/init.d/doornet2-dns-chain
+
+          echo "===== R4 NETWORK DEFAULTS ====="
+          grep -nE \
+            '6053|223\.5\.5\.5|119\.29\.29\.29|auto_set_dnsmasq|3053' \
+            files/etc/uci-defaults/97-doornet2-network-apps
+          sh -n files/etc/init.d/doornet2-dns-chain
+
+
+
+      # ============================================================
+      # 3B. R4 PassWall shunt presets + route-aware boot guard
+      # ============================================================
+
+      - name: Add DoorNet2 R4 PassWall shunt presets and delayed restart
+        run: |
+          set -e
+
+          mkdir -p \
+            files/etc/uci-defaults \
+            files/etc/init.d
+
+          cat > files/etc/uci-defaults/96-doornet2-passwall-shunt <<'EOF'
+          #!/bin/sh
+
+          # Always enable the boot guard if it exists.
+          if [ -x /etc/init.d/passwall-delay ]; then
+              /etc/init.d/passwall-delay enable >/dev/null 2>&1 || true
+          fi
+
+          # Remove the legacy PassWall stock myshunt only when it is still
+          # untouched. This also cleans up retained upgrades from R3 without
+          # deleting a user-customized legacy shunt.
+          if [ "$(uci -q get passwall.myshunt.remarks)" = "分流总节点" ] && \
+             [ "$(uci -q get passwall.myshunt.type)" = "Xray" ] && \
+             [ "$(uci -q get passwall.myshunt.protocol)" = "_shunt" ] && \
+             [ "$(uci -q get passwall.myshunt.DirectGame)" = "_direct" ] && \
+             [ "$(uci -q get passwall.myshunt.ProxyGame)" = "_default" ] && \
+             [ "$(uci -q get passwall.myshunt.AIGC)" = "_default" ] && \
+             [ "$(uci -q get passwall.myshunt.Streaming)" = "_default" ] && \
+             [ "$(uci -q get passwall.myshunt.Proxy)" = "_default" ] && \
+             [ "$(uci -q get passwall.myshunt.Direct)" = "_direct" ] && \
+             [ "$(uci -q get passwall.myshunt.default_node)" = "_direct" ]
+          then
+              uci -q delete passwall.myshunt
+              uci -q commit passwall
+          fi
+
+          # Do not overwrite a previously customized R4 preset.
+          if [ "$(uci -q get passwall.R4Shunt.remarks)" = "R4 分流总节点" ]; then
+              exit 0
+          fi
+
+          add_rule()
+          {
+              id="$1"
+              remarks="$2"
+              domains="$3"
+              ips="$4"
+
+              uci -q delete "passwall.$id"
+              uci -q set "passwall.$id=shunt_rules"
+              uci -q set "passwall.$id.remarks=$remarks"
+              uci -q set "passwall.$id.network=tcp,udp"
+
+              if [ -n "$domains" ]; then
+                  domain_list="$(
+                      printf '%s' "$domains" \
+                        | tr ',' '\n' \
+                        | sed '/^$/d;s/^/domain:/'
+                  )"
+                  uci -q set "passwall.$id.domain_list=$domain_list"
+              fi
+
+              if [ -n "$ips" ]; then
+                  ip_list="$(
+                      printf '%s' "$ips" \
+                        | tr ',' '\n' \
+                        | sed '/^$/d'
+                  )"
+                  uci -q set "passwall.$id.ip_list=$ip_list"
+              fi
+          }
+
+          # Mainland communication
+          add_rule DN_WeChat "WeChat / 微信" \
+            "wechat.com,weixin.qq.com,wx.qq.com,wechatapp.com,qpic.cn" ""
+          add_rule DN_QQ "QQ / 腾讯" \
+            "qq.com,qzone.qq.com,gtimg.com,idqqimg.com" ""
+
+          # Overseas communication
+          add_rule DN_LINE "LINE" \
+            "line.me,line-apps.com,line-scdn.net,lin.ee,line.naver.jp" ""
+          add_rule DN_WhatsApp "WhatsApp" \
+            "whatsapp.com,whatsapp.net" ""
+          add_rule DN_Signal "Signal" \
+            "signal.org,signal.art,whispersystems.org" ""
+          add_rule DN_Telegram "Telegram" \
+            "telegram.org,t.me,telegram.me,telegra.ph" \
+            "149.154.160.0/20,91.108.4.0/22,91.108.8.0/22,91.108.56.0/22"
+          add_rule DN_Discord "Discord" \
+            "discord.com,discord.gg,discordapp.com,discordapp.net,discordcdn.com" ""
+
+          # Social
+          add_rule DN_Facebook "Facebook / Messenger" \
+            "facebook.com,fbcdn.net,fb.me,fbsbx.com,messenger.com" ""
+          add_rule DN_Instagram "Instagram" \
+            "instagram.com,cdninstagram.com" ""
+          add_rule DN_XTwitter "X / Twitter" \
+            "x.com,twitter.com,twimg.com,t.co" ""
+          add_rule DN_Reddit "Reddit" \
+            "reddit.com,redditmedia.com,redditstatic.com,redd.it" ""
+
+          # Google
+          add_rule DN_YouTube "YouTube" \
+            "youtube.com,youtu.be,ytimg.com,googlevideo.com,youtube-nocookie.com" ""
+          add_rule DN_GoogleAI "Google AI / Gemini" \
+            "gemini.google.com,ai.google.dev,generativelanguage.googleapis.com,aistudio.google.com,deepmind.google" ""
+          add_rule DN_GmailDrive "Gmail / Google Drive" \
+            "gmail.com,mail.google.com,drive.google.com,docs.google.com" ""
+          add_rule DN_Google "Google" \
+            "google.com,gstatic.com,googleapis.com,googleusercontent.com,ggpht.com" ""
+
+          # AI
+          add_rule DN_OpenAI "OpenAI / ChatGPT" \
+            "openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com" ""
+          add_rule DN_Claude "Claude / Anthropic" \
+            "claude.ai,anthropic.com" ""
+          add_rule DN_Perplexity "Perplexity" "perplexity.ai" ""
+          add_rule DN_Copilot "Microsoft Copilot" \
+            "copilot.microsoft.com,copilot.cloud.microsoft" ""
+          add_rule DN_Grok "Grok / xAI" "grok.com,x.ai" ""
+
+          # Streaming
+          add_rule DN_Netflix "Netflix" \
+            "netflix.com,nflxvideo.net,nflximg.net,nflxext.com,nflxso.net" ""
+          add_rule DN_DisneyPlus "Disney+" \
+            "disneyplus.com,dssott.com,bamgrid.com,disney-plus.net" ""
+          add_rule DN_MaxHBO "Max / HBO" \
+            "max.com,hbomax.com,hbo.com,hbogo.com" ""
+          add_rule DN_PrimeVideo "Amazon Prime Video" \
+            "primevideo.com,amazonvideo.com,aiv-cdn.net" ""
+          add_rule DN_Spotify "Spotify" \
+            "spotify.com,scdn.co,spotifycdn.com" ""
+          add_rule DN_TikTok "TikTok" \
+            "tiktok.com,tiktokcdn.com,tiktokv.com,byteoversea.com,ibytedtos.com,muscdn.com" ""
+
+          # Platform / cloud / work
+          add_rule DN_Apple "Apple / iCloud / App Store" \
+            "apple.com,icloud.com,apple-cloudkit.com,mzstatic.com" ""
+          add_rule DN_Microsoft "Microsoft / Office / OneDrive" \
+            "microsoft.com,live.com,office.com,office365.com,onedrive.com" ""
+          add_rule DN_GitHub "GitHub" \
+            "github.com,githubusercontent.com,githubassets.com,github.io" ""
+          add_rule DN_Slack "Slack" "slack.com,slack-edge.com" ""
+          add_rule DN_Zoom "Zoom" "zoom.us,zoom.com" ""
+          add_rule DN_Notion "Notion" \
+            "notion.so,notion.site,notionusercontent.com" ""
+          add_rule DN_Dropbox "Dropbox" \
+            "dropbox.com,dropboxapi.com,dropboxusercontent.com" ""
+
+          # Games
+          add_rule DN_PlayStation "PlayStation" \
+            "playstation.com,playstation.net,sonyentertainmentnetwork.com" ""
+          add_rule DN_Nintendo "Nintendo" \
+            "nintendo.com,nintendo.net,nintendo.co.jp" ""
+          add_rule DN_Xbox "Xbox" \
+            "xbox.com,xboxlive.com,xboxservices.com" ""
+
+          # Local media + umbrella rules
+          add_rule DN_LocalMedia "Emby / Jellyfin / Plex" \
+            "emby.media,jellyfin.org,plex.tv" ""
+          add_rule DN_AIGC "AIGC" \
+            "openai.com,chatgpt.com,claude.ai,anthropic.com,gemini.google.com,perplexity.ai,copilot.microsoft.com,grok.com,x.ai" ""
+          add_rule DN_Streaming "Streaming" \
+            "youtube.com,netflix.com,disneyplus.com,max.com,hbomax.com,primevideo.com,spotify.com,tiktok.com" ""
+          add_rule DN_ProxyGame "ProxyGame" \
+            "playstation.com,playstation.net,nintendo.com,nintendo.net,xbox.com,xboxlive.com" ""
+          add_rule DN_DirectGame "DirectGame" "" ""
+
+          # Create the shunt framework without embedding any personal node ID.
+          # Every rule starts as direct. After importing nodes, the user only
+          # needs to choose the desired node in the R4Shunt dropdowns.
+          uci -q delete passwall.R4Shunt
+          uci -q set passwall.R4Shunt='nodes'
+          uci -q set passwall.R4Shunt.remarks='R4 分流总节点'
+          uci -q set passwall.R4Shunt.type='Xray'
+          uci -q set passwall.R4Shunt.protocol='_shunt'
+          uci -q set passwall.R4Shunt.domainStrategy='IPOnDemand'
+          uci -q set passwall.R4Shunt.default_node='_direct'
+
+          for rule in \
+            DN_WeChat DN_QQ \
+            DN_LINE DN_WhatsApp DN_Signal DN_Telegram DN_Discord \
+            DN_Facebook DN_Instagram DN_XTwitter DN_Reddit \
+            DN_YouTube DN_GoogleAI DN_GmailDrive DN_Google \
+            DN_OpenAI DN_Claude DN_Perplexity DN_Copilot DN_Grok \
+            DN_Netflix DN_DisneyPlus DN_MaxHBO DN_PrimeVideo DN_Spotify DN_TikTok \
+            DN_Apple DN_Microsoft DN_GitHub DN_Slack DN_Zoom DN_Notion DN_Dropbox \
+            DN_PlayStation DN_Nintendo DN_Xbox \
+            DN_LocalMedia DN_AIGC DN_Streaming DN_ProxyGame DN_DirectGame
+          do
+              uci -q set "passwall.R4Shunt.${rule}=_direct"
+          done
+
+          # Do not change the user's current global on/off state or TCP node
+          # during a retained sysupgrade.
+          uci -q commit passwall
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/96-doornet2-passwall-shunt
+          sh -n files/etc/uci-defaults/96-doornet2-passwall-shunt
+
+          cat > files/etc/init.d/passwall-delay <<'EOF'
+          #!/bin/sh /etc/rc.common
+
+          START=99
+          STOP=15
+
+          LOG="/tmp/passwall-delay.log"
+
+          start()
+          {
+              (
+                  echo "$(date '+%Y-%m-%d %H:%M:%S') R4 PassWall guard starting" >"$LOG"
+
+                  GLOBAL_ENABLED="$(uci -q get passwall.@global[0].enabled)"
+                  SOCKS_ENABLED="$(uci -q get passwall.@global[0].socks_enabled)"
+
+                  if [ "$GLOBAL_ENABLED" != "1" ] && [ "$SOCKS_ENABLED" != "1" ]; then
+                      echo "$(date '+%Y-%m-%d %H:%M:%S') PassWall not enabled; no restart needed" >>"$LOG"
+                      exit 0
+                  fi
+
+                  i=0
+                  while [ "$i" -lt 30 ]; do
+                      if ip route 2>/dev/null | grep -q '^default '; then
+                          echo "$(date '+%Y-%m-%d %H:%M:%S') default route ready" >>"$LOG"
+                          break
+                      fi
+                      sleep 1
+                      i=$((i + 1))
+                  done
+
+                  sleep 5
+                  echo "$(date '+%Y-%m-%d %H:%M:%S') restarting PassWall" >>"$LOG"
+                  /etc/init.d/passwall restart >>"$LOG" 2>&1
+
+                  sleep 5
+                  if ps w 2>/dev/null | grep '[x]ray' >/dev/null 2>&1; then
+                      echo "$(date '+%Y-%m-%d %H:%M:%S') Xray running" >>"$LOG"
+                  else
+                      echo "$(date '+%Y-%m-%d %H:%M:%S') Xray not running after restart" >>"$LOG"
+                  fi
+              ) &
+          }
+
+          stop()
+          {
+              :
+          }
+          EOF
+
+          chmod 755 files/etc/init.d/passwall-delay
+          sh -n files/etc/init.d/passwall-delay
+
+          echo "===== R4 PASSWALL PRESETS ====="
+          grep -nE \
+            'R4Shunt|DN_WeChat|DN_LINE|DN_OpenAI|DN_Netflix|DN_AIGC|DN_Streaming' \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt \
+            | head -100
+
+
+      # ============================================================
+      # 3C. R4 Final stability helpers
+      #   - UU route-aware delayed recovery
+      #   - read-only DoorNet2 health/self-check command
+      # ============================================================
+
+      - name: Add DoorNet2 R4 final stability helpers
+        run: |
+          set -e
+
+          mkdir -p \
+            files/etc/init.d \
+            files/etc/uci-defaults \
+            files/usr/bin
+
+          cat > files/etc/init.d/uu-delay <<'EOF'
+          #!/bin/sh /etc/rc.common
+
+          START=99
+          STOP=15
+
+          LOG="/tmp/uu-delay.log"
+
+          start()
+          {
+              (
+                  echo "$(date '+%Y-%m-%d %H:%M:%S') R4 UU guard starting" >"$LOG"
+
+                  ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+                  if [ "$ENABLED" != "1" ]; then
+                      echo "$(date '+%Y-%m-%d %H:%M:%S') UU disabled; no restart needed" >>"$LOG"
+                      exit 0
+                  fi
+
+                  i=0
+                  while [ "$i" -lt 45 ]; do
+                      if ip route 2>/dev/null | grep -q '^default '; then
+                          echo "$(date '+%Y-%m-%d %H:%M:%S') default route ready" >>"$LOG"
+                          break
+                      fi
+                      sleep 1
+                      i=$((i + 1))
+                  done
+
+                  # Give DNS/NTP a short window after the route appears.
+                  sleep 5
+
+                  attempt=1
+                  while [ "$attempt" -le 3 ]; do
+                      echo "$(date '+%Y-%m-%d %H:%M:%S') restarting UU, attempt $attempt" >>"$LOG"
+
+                      /etc/init.d/uuplugin restart >>"$LOG" 2>&1 || true
+                      sleep 12
+
+                      if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin ' | grep -v grep >/dev/null 2>&1; then
+                          echo "$(date '+%Y-%m-%d %H:%M:%S') UU runtime running" >>"$LOG"
+                          exit 0
+                      fi
+
+                      attempt=$((attempt + 1))
+                  done
+
+                  echo "$(date '+%Y-%m-%d %H:%M:%S') UU runtime not running after retries" >>"$LOG"
+              ) &
+          }
+
+          stop()
+          {
+              :
+          }
+          EOF
+
+          chmod 755 files/etc/init.d/uu-delay
+          sh -n files/etc/init.d/uu-delay
+
+          cat > files/etc/uci-defaults/94-doornet2-final-helpers <<'EOF'
+          #!/bin/sh
+
+          # These guards are inert when their corresponding app is disabled.
+          for svc in passwall-delay doornet2-dns-chain uu-delay; do
               if [ -x "/etc/init.d/$svc" ]; then
-                  "/etc/init.d/$svc" disable >/dev/null 2>&1 || true
-                  "/etc/init.d/$svc" stop >/dev/null 2>&1 || true
+                  "/etc/init.d/$svc" enable >/dev/null 2>&1 || true
               fi
           done
 
           exit 0
           EOF
 
-          chmod 755 files/etc/uci-defaults/97-doornet2-network-apps
+          chmod 755 files/etc/uci-defaults/94-doornet2-final-helpers
+          sh -n files/etc/uci-defaults/94-doornet2-final-helpers
 
-          sh -n files/etc/uci-defaults/97-doornet2-network-apps
+          cat > files/usr/bin/doornet2-health <<'EOF'
+          #!/bin/sh
+
+          ok()
+          {
+              printf '  [OK]   %s\n' "$*"
+          }
+
+          warn()
+          {
+              printf '  [WARN] %s\n' "$*"
+          }
+
+          info()
+          {
+              printf '  [INFO] %s\n' "$*"
+          }
+
+          echo "===== DoorNet2 R4 FINAL HEALTH CHECK ====="
+
+          echo
+          echo "===== RELEASE ====="
+          if [ -r /etc/doornet2_release ]; then
+              grep -E \
+                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH)=" \
+                /etc/doornet2_release 2>/dev/null || true
+          else
+              warn "/etc/doornet2_release missing"
+          fi
+
+          echo
+          echo "===== ROOT / STORAGE ====="
+          ROOT_SRC="$(mount | awk '$3=="/"{print $1; exit}')"
+          ROOT_TYPE="$(mount | awk '$3=="/"{print $5; exit}')"
+          info "root=$ROOT_SRC type=$ROOT_TYPE"
+
+          ROOT_DISK="$(printf '%s\n' "$ROOT_SRC" | sed -n 's#^/dev/\(mmcblk[0-9]\+\)p[0-9]\+$#\1#p')"
+          if [ -n "$ROOT_DISK" ] && [ -r "/sys/block/$ROOT_DISK/device/type" ]; then
+              MMC_TYPE="$(cat "/sys/block/$ROOT_DISK/device/type" 2>/dev/null)"
+              MMC_PATH="$(readlink -f "/sys/block/$ROOT_DISK/device" 2>/dev/null)"
+              info "$ROOT_DISK type=$MMC_TYPE"
+              info "$MMC_PATH"
+
+              if [ "$MMC_TYPE" = "MMC" ] && echo "$MMC_PATH" | grep -q 'fe330000.mmc'; then
+                  ok "root is physical eMMC"
+              elif [ "$MMC_TYPE" = "SD" ] && echo "$MMC_PATH" | grep -q 'fe320000.mmc'; then
+                  ok "root is physical TF/SD"
+              else
+                  warn "root MMC physical mapping is unexpected"
+              fi
+          fi
+
+          df -h / 2>/dev/null || true
+
+          echo
+          echo "===== IPTABLES ====="
+          if command -v iptables >/dev/null 2>&1; then
+              iptables --version 2>/dev/null || true
+              iptables -w -t nat -L >/dev/null 2>&1 && ok "IPv4 NAT" || warn "IPv4 NAT failed"
+              iptables -w -t mangle -L >/dev/null 2>&1 && ok "IPv4 mangle" || warn "IPv4 mangle failed"
+          else
+              warn "iptables missing"
+          fi
+
+          if command -v ip6tables >/dev/null 2>&1; then
+              ip6tables --version 2>/dev/null || true
+              ip6tables -w -t filter -L >/dev/null 2>&1 && ok "IPv6 filter" || warn "IPv6 filter failed"
+              ip6tables -w -t mangle -L >/dev/null 2>&1 && ok "IPv6 mangle" || warn "IPv6 mangle failed"
+          else
+              warn "ip6tables missing"
+          fi
+
+          echo
+          echo "===== DNS CHAIN ====="
+          DNSMASQ_SERVER="$(uci -q get dhcp.@dnsmasq[0].server)"
+          DNSMASQ_NORESOLV="$(uci -q get dhcp.@dnsmasq[0].noresolv)"
+          info "dnsmasq.server=${DNSMASQ_SERVER:-default}"
+          info "dnsmasq.noresolv=${DNSMASQ_NORESOLV:-default}"
+
+          netstat -lnptu 2>/dev/null | grep -E ':53 |:3000|:3053|:6053' || true
+
+          if netstat -lnptu 2>/dev/null | grep -q ':6053 '; then
+              ok "SmartDNS :6053 listening"
+          else
+              warn "SmartDNS :6053 not listening"
+          fi
+
+          if netstat -lnptu 2>/dev/null | grep -q ':3053 '; then
+              ok "AdGuard DNS :3053 listening"
+          else
+              info "AdGuard DNS :3053 not listening (normal before first-run setup)"
+          fi
+
+          if command -v nslookup >/dev/null 2>&1; then
+              nslookup www.baidu.com 127.0.0.1 >/tmp/doornet2-health-dns.log 2>&1 \
+                && ok "dnsmasq :53 query" \
+                || warn "dnsmasq :53 query failed"
+          fi
+
+          echo
+          echo "===== PASSWALL ====="
+          PW_ENABLED="$(uci -q get passwall.@global[0].enabled)"
+          PW_NODE="$(uci -q get passwall.@global[0].tcp_node)"
+          PW_DNS_REDIRECT="$(uci -q get passwall.@global[0].dns_redirect)"
+          info "enabled=${PW_ENABLED:-0}"
+          info "tcp_node=${PW_NODE:-none}"
+          info "dns_redirect=${PW_DNS_REDIRECT:-unset}"
+
+          if ps w 2>/dev/null | grep '[x]ray' >/dev/null 2>&1; then
+              ok "Xray process running"
+          else
+              info "Xray not running"
+          fi
+
+          netstat -lntp 2>/dev/null | grep -E ':1080|:1081' || true
+
+          echo
+          echo "===== UU ====="
+          UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+          info "enabled=${UU_ENABLED:-0}"
+
+          if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin ' | grep -v grep >/dev/null 2>&1; then
+              ok "UU runtime running"
+          else
+              info "UU runtime not running"
+          fi
+
+          echo
+          echo "===== BOOT GUARDS ====="
+          for svc in passwall-delay doornet2-dns-chain uu-delay; do
+              if [ -x "/etc/init.d/$svc" ]; then
+                  /etc/init.d/"$svc" enabled >/dev/null 2>&1 \
+                    && ok "$svc enabled" \
+                    || warn "$svc disabled"
+              else
+                  warn "$svc missing"
+              fi
+          done
+
+          echo
+          echo "===== ONLINE UPDATE ====="
+          [ -x /usr/bin/doornet2-updater ] \
+            && ok "firmware updater installed" \
+            || warn "firmware updater missing"
+
+          [ -x /usr/bin/doornet2-app-updater ] \
+            && ok "network-app updater installed" \
+            || warn "network-app updater missing"
+
+          [ -x /usr/bin/doornet2-passwall-updater ] \
+            && ok "PassWall updater installed" \
+            || warn "PassWall updater missing"
+
+          echo
+          echo "===== DONE ====="
+          echo "Read-only check complete."
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-health
+          sh -n files/usr/bin/doornet2-health
+
+          echo "===== R4 FINAL HELPERS ====="
+          test -x files/etc/init.d/uu-delay
+          test -x files/etc/uci-defaults/94-doornet2-final-helpers
+          test -x files/usr/bin/doornet2-health
 
 
       # ============================================================
-      # 4. R3 UI strategy
+      # 4. R4 UI strategy
       #
       # Use the native Design theme for the whole shell.
       # No global Argon "fake iStoreOS" stylesheet is injected.
@@ -585,7 +1287,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== VERIFY R3 DESIGN UI SOURCE ====="
+          echo "===== VERIFY R4 DESIGN UI SOURCE ====="
 
           test -f package/lean/luci-theme-design/Makefile
           test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
@@ -605,15 +1307,15 @@ jobs:
 
 
       # ============================================================
-      # 4A. R3 time + Design first-boot fix
+      # 4A. R4 time + Design first-boot fix
       #
-      # R3 intentionally removes the floating CPU/date/time badge.
+      # R4 intentionally removes the floating CPU/date/time badge.
       # RK3399 thermal support remains untouched, so the normal LuCI
       # system/CPU information line can continue to display temperature.
       # Timezone/NTP also remain configured.
       # ============================================================
 
-      - name: Add DoorNet2 R3 time and Design first-boot fix
+      - name: Add DoorNet2 R4 time and Design first-boot fix
         run: |
           set -e
 
@@ -678,7 +1380,7 @@ jobs:
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R3 UI/TIME FILES ====="
+          echo "===== R4 UI/TIME FILES ====="
           test -x files/etc/uci-defaults/98-doornet2-time
           test -x files/etc/uci-defaults/99-doornet2-design-header-fix
 
@@ -986,7 +1688,7 @@ jobs:
 
           cat > files/etc/doornet2_release <<EOF
           DOORNET2_VERSION='${DOORNET2_VERSION}'
-          DOORNET2_RELEASE='R3'
+          DOORNET2_RELEASE='R4'
           DOORNET2_TAG='${DOORNET2_TAG}'
           DOORNET2_BUILD_DATE='${DOORNET2_BUILD_DATE}'
           DOORNET2_GIT_COMMIT='${GITHUB_SHA}'
@@ -998,8 +1700,14 @@ jobs:
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
           DOORNET2_UI='quickstart-design-dark-v1'
-          DOORNET2_PASSWALL='builtin-online-feed-v1'
-          DOORNET2_NETWORK_APPS='smartdns-uu-runtime-adguard-online-v2'
+          DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'
+          DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-runtime-online-v3'
+          DOORNET2_SHUNT='preset-rules-clean-v2'
+          DOORNET2_DNS_CHAIN='adguard-smartdns-auto-v1'
+          DOORNET2_PASSWALL_DELAY='route-aware-v1'
+          DOORNET2_UU_DELAY='route-aware-retry-v1'
+          DOORNET2_HEALTH='cli-selfcheck-v1'
+          DOORNET2_FINAL_PROFILE='stable-final-clean-shunt-v2'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           EOF
 
@@ -3849,7 +4557,7 @@ jobs:
 
           # PassWall (official Openwrt-Passwall feeds)
           # DoorNet2 stable tree uses firewall3 + legacy iptables.
-          # R3 keeps only the Xray core and explicitly includes the IPv4/IPv6
+          # R4 keeps only the Xray core and explicitly includes the IPv4/IPv6
           # legacy xtables dependencies needed by PassWall.
           # CONFIG_PACKAGE_dnsmasq is not set
           CONFIG_PACKAGE_dnsmasq-full=y
@@ -3858,7 +4566,7 @@ jobs:
 
           # DoorNet2/RK3399 stable tree uses firewall3 + legacy iptables.
           # R34 accidentally selected the nftables option even though fw4/nft
-          # were absent. R3 explicitly selects the matching iptables backend.
+          # were absent. R4 explicitly selects the matching iptables backend.
           CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
           # CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set
 
@@ -3870,7 +4578,7 @@ jobs:
           CONFIG_PACKAGE_ip6tables=y
           CONFIG_PACKAGE_kmod-ip6tables=y
 
-          # R3 keeps PassWall intentionally lean: Xray only.
+          # R4 keeps PassWall intentionally lean: Xray only.
           # This avoids optional cores/plugins that either need newer Go/Rust
           # toolchains or previously failed on this legacy LEDE/RK3399 tree.
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
@@ -3895,12 +4603,13 @@ jobs:
           # CONFIG_PACKAGE_v2ray-plugin is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
 
-          # Xray 25.1.30 is the sole proxy core in R3.
+          # Xray 25.1.30 is the sole proxy core in R4.
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
 
           # DNS acceleration / game acceleration / DNS filtering
-          # Installed by default but kept disabled on first boot to avoid
-          # DNS port conflicts until the user chooses a topology.
+          # R4 prepares SmartDNS on :6053 without taking over dnsmasq.
+          # AdGuard remains user-initialized; the DNS-chain helper only
+          # switches dnsmasq after AdGuard is actually listening on :3053.
           CONFIG_PACKAGE_smartdns=y
           CONFIG_PACKAGE_luci-app-smartdns=y
           CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
@@ -4093,6 +4802,37 @@ jobs:
           sh -n files/usr/bin/doornet2-app-updater
           test -x files/etc/uci-defaults/97-doornet2-network-apps
           sh -n files/etc/uci-defaults/97-doornet2-network-apps
+          test -x files/etc/init.d/doornet2-dns-chain
+          sh -n files/etc/init.d/doornet2-dns-chain
+          test -x files/etc/uci-defaults/96-doornet2-passwall-shunt
+          sh -n files/etc/uci-defaults/96-doornet2-passwall-shunt
+          test -x files/etc/init.d/passwall-delay
+          sh -n files/etc/init.d/passwall-delay
+
+          test -x files/etc/init.d/uu-delay
+          sh -n files/etc/init.d/uu-delay
+          test -x files/etc/uci-defaults/94-doornet2-final-helpers
+          sh -n files/etc/uci-defaults/94-doornet2-final-helpers
+          test -x files/usr/bin/doornet2-health
+          sh -n files/usr/bin/doornet2-health
+
+          grep -q "R4 分流总节点" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+
+          PASSWALL_DEFAULT_CFG="feeds/passwall_luci/luci-app-passwall/root/usr/share/passwall/0_default_config"
+          test -f "$PASSWALL_DEFAULT_CFG"
+          if grep -q "^config nodes 'myshunt'$" "$PASSWALL_DEFAULT_CFG"; then
+              echo "ERROR: legacy stock PassWall myshunt is still present."
+              exit 1
+          fi
+          grep -q "DN_WeChat" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "DN_LINE" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "DN_OpenAI" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "DN_Streaming" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
 
           echo
           echo "===== R34 UI PACKAGES ====="
@@ -4130,7 +4870,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R3 guard: the obsolete fixed-download UU package must not appear
+          # R4 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4308,16 +5048,22 @@ jobs:
             "extroot": false,
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
-            "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2",
+            "network_apps": "passwall-smartdns-adguard-chain-uu-runtime-online-v3",
             "ui": "quickstart-design-dark-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
-            "release": "R3"
+            "shunt_presets": "preset-rules-clean-v2",
+            "dns_chain": "adguard-smartdns-auto-v1",
+            "passwall_delay": "route-aware-v1",
+            "uu_delay": "route-aware-retry-v1",
+            "health_check": "cli-selfcheck-v1",
+            "profile": "stable-final-clean-shunt-v2",
+            "release": "R4"
           }
           EOF
 
 
           cat > release-notes.md <<EOF
-          # DoorNet2 OpenWrt R3 (${DOORNET2_VERSION})
+          # DoorNet2 OpenWrt R4 (${DOORNET2_VERSION})
 
           R18 storage layout:
 
@@ -4351,7 +5097,7 @@ jobs:
           - ext4 is automatically grown back to the existing TF p2 size
           - eMMC keeps the original Rockchip upgrade behaviour
 
-          R3 stable interface:
+          R4 stable interface:
 
           - Design theme is the default LuCI shell
           - QuickStart remains the iStoreOS-style home/workflow page
@@ -4361,13 +5107,56 @@ jobs:
           - CPU temperature remains available in the normal system/CPU status line
           - Timezone/NTP remain configured for Asia/Shanghai
 
-          R3 PassWall compatibility:
+          R4 PassWall compatibility:
 
           - PassWall is pinned to 25.1.15-1
           - Xray is pinned to 25.1.30 for the Go 1.23 buildroot
           - firewall3/iptables transparent proxy backend is selected
           - Native LEDE ip6tables userspace and kmod-ip6tables support are included
           - Xray is the only built-in proxy core; optional legacy/newer cores remain disabled
+
+          R4 FINAL stability profile:
+
+          - LAN management IP remains 192.168.100.1
+          - Design dark UI + QuickStart remain the default experience
+          - The old top-right CPU/date/time floating badge stays removed
+          - TF-first / eMMC-fallback boot and physical upgrade guards are retained
+          - Online firmware updater, PassWall updater and network-app updater are retained
+          - PassWall has a route-aware delayed restart guard
+          - UU has a route-aware 3-attempt restart guard when UU is enabled
+          - AdGuard/SmartDNS DNS-chain helper waits for real :3053 readiness
+          - /usr/bin/doornet2-health provides a read-only whole-system self-check
+          - No personal proxy node IDs or AdGuard password are baked into firmware
+
+          R4 built-in PassWall shunt presets:
+
+          - PassWall's stock `myshunt` / "Xray 分流：分流总节点" is removed on
+            clean installs so LuCI shows only the DoorNet2 R4 shunt framework
+          - On retained upgrades, an untouched stock myshunt is removed, while
+            a user-customized legacy myshunt is preserved
+
+          - Preloaded "R4 分流总节点" framework
+          - Rules include WeChat, QQ, LINE, WhatsApp, Signal, Telegram,
+            Discord, Facebook, Instagram, X/Twitter, Reddit, Google,
+            YouTube, Google AI/Gemini, Gmail/Drive, OpenAI/ChatGPT,
+            Claude, Perplexity, Copilot, Grok, Netflix, Disney+, Max/HBO,
+            Prime Video, Spotify, TikTok, Apple, Microsoft, GitHub, Slack,
+            Zoom, Notion, Dropbox, PlayStation, Nintendo, Xbox, local media,
+            AIGC, Streaming, ProxyGame and DirectGame
+          - Personal/imported proxy node IDs are never baked into firmware
+          - Every preset starts as direct; select the desired proxy node in LuCI
+          - Existing global PassWall state is preserved during retained upgrades
+          - Route-aware delayed PassWall restart improves boot reliability
+
+          R4 DNS preset:
+
+          - SmartDNS clean-install default: port 6053
+          - Tested upstreams: 223.5.5.5 and 119.29.29.29
+          - SmartDNS does not auto-edit dnsmasq
+          - AdGuard Home keeps normal first-run user/password setup
+          - When AdGuard is actually listening on 3053, R4 automatically wires:
+            dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
+          - PassWall DNS redirect is disabled when this validated chain activates
 
           Online-updatable network applications:
 
@@ -4605,7 +5394,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R3 stable build finished"
+          echo "DoorNet2 R4 stable build finished"
           echo "========================================"
 
           echo
@@ -4700,7 +5489,7 @@ jobs:
           echo "===== PASSWALL ====="
 
           grep -q \
-            "DOORNET2_PASSWALL='builtin-online-feed-v1'" \
+            "DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'" \
             files/etc/doornet2_release
 
           echo "===== FINAL PASSWALL CONFIG ====="
@@ -4891,7 +5680,7 @@ jobs:
           echo "===== ONLINE NETWORK APPS ====="
 
           grep -q \
-            "DOORNET2_NETWORK_APPS='smartdns-uu-runtime-adguard-online-v2'" \
+            "DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-runtime-online-v3'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
@@ -4914,6 +5703,37 @@ jobs:
 
           test -x files/etc/uci-defaults/97-doornet2-network-apps
           sh -n files/etc/uci-defaults/97-doornet2-network-apps
+          test -x files/etc/init.d/doornet2-dns-chain
+          sh -n files/etc/init.d/doornet2-dns-chain
+          test -x files/etc/uci-defaults/96-doornet2-passwall-shunt
+          sh -n files/etc/uci-defaults/96-doornet2-passwall-shunt
+          test -x files/etc/init.d/passwall-delay
+          sh -n files/etc/init.d/passwall-delay
+
+          test -x files/etc/init.d/uu-delay
+          sh -n files/etc/init.d/uu-delay
+          test -x files/etc/uci-defaults/94-doornet2-final-helpers
+          sh -n files/etc/uci-defaults/94-doornet2-final-helpers
+          test -x files/usr/bin/doornet2-health
+          sh -n files/usr/bin/doornet2-health
+
+          grep -q "R4 分流总节点" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+
+          PASSWALL_DEFAULT_CFG="feeds/passwall_luci/luci-app-passwall/root/usr/share/passwall/0_default_config"
+          test -f "$PASSWALL_DEFAULT_CFG"
+          if grep -q "^config nodes 'myshunt'$" "$PASSWALL_DEFAULT_CFG"; then
+              echo "ERROR: legacy stock PassWall myshunt is still present."
+              exit 1
+          fi
+          grep -q "DN_WeChat" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "DN_LINE" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "DN_OpenAI" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "DN_Streaming" \
+            files/etc/uci-defaults/96-doornet2-passwall-shunt
 
           grep -nE \
             'smartdns|adguardhome|luci-app-smartdns|luci-app-uugamebooster' \
@@ -4936,7 +5756,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R3 DESIGN + QUICKSTART UI ====="
+          echo "===== R4 DESIGN + QUICKSTART UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-design-dark-v1'" \
@@ -5044,7 +5864,7 @@ jobs:
 
 
           echo
-          echo "===== R3 TIME / CPU TEMP POLICY ====="
+          echo "===== R4 TIME / CPU TEMP POLICY ====="
 
           grep -q \
             "DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'" \
@@ -5059,7 +5879,7 @@ jobs:
           sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
 
           # Thermal support is intentionally left to the existing RK3399/
-          # LuCI status stack. R3 adds no floating monitor frontend.
+          # LuCI status stack. R4 adds no floating monitor frontend.
 
 
           echo
@@ -5086,5 +5906,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R3 STABLE + PASSWALL + DESIGN + ONLINE APPS + CAPACITY PATCH SUCCESS"
+          echo "R4 FINAL + SHUNT + DNS CHAIN + PASSWALL + UU GUARD + DESIGN + CAPACITY SUCCESS"
           echo "========================================"
