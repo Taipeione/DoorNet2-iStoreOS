@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R2
+name: DoorNet2-OpenWrt-iStore-R3
 
 on:
   workflow_dispatch:
@@ -130,8 +130,8 @@ jobs:
           SHORT_SHA="${GITHUB_SHA:0:7}"
 
           # DoorNet2 public/stable numbering restarts here.
-          # R2 -> R3 -> R4... is bumped manually in this workflow.
-          RELEASE_NUM="2"
+          # R3 -> R4 -> R5... is bumped manually in this workflow.
+          RELEASE_NUM="3"
 
           VERSION="${BUILD_DAY}-r${RELEASE_NUM}-${SHORT_SHA}"
           TAG="doornet2-${VERSION}"
@@ -222,7 +222,7 @@ jobs:
           grep -q '^PKG_RELEASE:=1$' \
             feeds/passwall_luci/luci-app-passwall/Makefile
 
-          # R2 is an iptables/firewall3 build. This legacy LEDE tree already
+          # R3 is an iptables/firewall3 build. This legacy LEDE tree already
           # ships xtables-legacy as the normal `iptables` package and does NOT
           # define the newer OpenWrt package name `iptables-zz-legacy`.
           # Patch only that dependency name; PassWall still uses its normal
@@ -269,7 +269,7 @@ jobs:
           #   v2ray-plugin 5.49.0 -> Go >= 1.25.5
           #   current Xray        -> newer Go toolchain
           #
-          # DoorNet2 R2 pairs PassWall 25.1.15-1 with Xray 25.1.30,
+          # DoorNet2 R3 pairs PassWall 25.1.15-1 with Xray 25.1.30,
           # a compatible 2025-era combination. Xray 25.1.30 uses Go 1.23,
           # while Sing-box/v2ray-plugin from the current packages feed require
           # newer Go toolchains, so those remain disabled.
@@ -507,7 +507,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R2 UI policy:
+          # DoorNet2 R3 UI policy:
           # Design default + QuickStart home, with Argon/Bootstrap recovery.
 
           uci -q set luci.themes.Design='/luci-static/design'
@@ -539,7 +539,7 @@ jobs:
                   option navbar_proxy 'passwall'
           EOF
 
-          echo "===== R2 UI DEFAULTS ====="
+          echo "===== R3 UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
           cat files/etc/config/design
 
@@ -553,7 +553,7 @@ jobs:
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R2 ships the network apps but keeps them disabled on a clean boot
+          # DoorNet2 R3 ships the network apps but keeps them disabled on a clean boot
           # so no credentials or DNS ownership are silently imposed.
           # The validated topology is:
           #   dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
@@ -575,7 +575,7 @@ jobs:
 
 
       # ============================================================
-      # 4. R2 UI strategy
+      # 4. R3 UI strategy
       #
       # Use the native Design theme for the whole shell.
       # No global Argon "fake iStoreOS" stylesheet is injected.
@@ -585,7 +585,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== VERIFY R2 DESIGN UI SOURCE ====="
+          echo "===== VERIFY R3 DESIGN UI SOURCE ====="
 
           test -f package/lean/luci-theme-design/Makefile
           test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
@@ -605,15 +605,15 @@ jobs:
 
 
       # ============================================================
-      # 4A. R2 time + Design first-boot fix
+      # 4A. R3 time + Design first-boot fix
       #
-      # R2 intentionally removes the floating CPU/date/time badge.
+      # R3 intentionally removes the floating CPU/date/time badge.
       # RK3399 thermal support remains untouched, so the normal LuCI
       # system/CPU information line can continue to display temperature.
       # Timezone/NTP also remain configured.
       # ============================================================
 
-      - name: Add DoorNet2 R2 time and Design first-boot fix
+      - name: Add DoorNet2 R3 time and Design first-boot fix
         run: |
           set -e
 
@@ -678,7 +678,7 @@ jobs:
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R2 UI/TIME FILES ====="
+          echo "===== R3 UI/TIME FILES ====="
           test -x files/etc/uci-defaults/98-doornet2-time
           test -x files/etc/uci-defaults/99-doornet2-design-header-fix
 
@@ -986,7 +986,7 @@ jobs:
 
           cat > files/etc/doornet2_release <<EOF
           DOORNET2_VERSION='${DOORNET2_VERSION}'
-          DOORNET2_RELEASE='R2'
+          DOORNET2_RELEASE='R3'
           DOORNET2_TAG='${DOORNET2_TAG}'
           DOORNET2_BUILD_DATE='${DOORNET2_BUILD_DATE}'
           DOORNET2_GIT_COMMIT='${GITHUB_SHA}'
@@ -3849,7 +3849,7 @@ jobs:
 
           # PassWall (official Openwrt-Passwall feeds)
           # DoorNet2 stable tree uses firewall3 + legacy iptables.
-          # R2 keeps only the Xray core and explicitly includes the IPv4/IPv6
+          # R3 keeps only the Xray core and explicitly includes the IPv4/IPv6
           # legacy xtables dependencies needed by PassWall.
           # CONFIG_PACKAGE_dnsmasq is not set
           CONFIG_PACKAGE_dnsmasq-full=y
@@ -3858,7 +3858,7 @@ jobs:
 
           # DoorNet2/RK3399 stable tree uses firewall3 + legacy iptables.
           # R34 accidentally selected the nftables option even though fw4/nft
-          # were absent. R2 explicitly selects the matching iptables backend.
+          # were absent. R3 explicitly selects the matching iptables backend.
           CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
           # CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set
 
@@ -3870,7 +3870,7 @@ jobs:
           CONFIG_PACKAGE_ip6tables=y
           CONFIG_PACKAGE_kmod-ip6tables=y
 
-          # R2 keeps PassWall intentionally lean: Xray only.
+          # R3 keeps PassWall intentionally lean: Xray only.
           # This avoids optional cores/plugins that either need newer Go/Rust
           # toolchains or previously failed on this legacy LEDE/RK3399 tree.
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
@@ -3895,7 +3895,7 @@ jobs:
           # CONFIG_PACKAGE_v2ray-plugin is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
 
-          # Xray 25.1.30 is the sole proxy core in R2.
+          # Xray 25.1.30 is the sole proxy core in R3.
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
 
           # DNS acceleration / game acceleration / DNS filtering
@@ -4130,7 +4130,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R2 guard: the obsolete fixed-download UU package must not appear
+          # R3 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4311,13 +4311,13 @@ jobs:
             "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2",
             "ui": "quickstart-design-dark-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
-            "release": "R2"
+            "release": "R3"
           }
           EOF
 
 
           cat > release-notes.md <<EOF
-          # DoorNet2 OpenWrt R2 (${DOORNET2_VERSION})
+          # DoorNet2 OpenWrt R3 (${DOORNET2_VERSION})
 
           R18 storage layout:
 
@@ -4351,7 +4351,7 @@ jobs:
           - ext4 is automatically grown back to the existing TF p2 size
           - eMMC keeps the original Rockchip upgrade behaviour
 
-          R2 stable interface:
+          R3 stable interface:
 
           - Design theme is the default LuCI shell
           - QuickStart remains the iStoreOS-style home/workflow page
@@ -4361,7 +4361,7 @@ jobs:
           - CPU temperature remains available in the normal system/CPU status line
           - Timezone/NTP remain configured for Asia/Shanghai
 
-          R2 PassWall compatibility:
+          R3 PassWall compatibility:
 
           - PassWall is pinned to 25.1.15-1
           - Xray is pinned to 25.1.30 for the Go 1.23 buildroot
@@ -4605,7 +4605,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R2 stable build finished"
+          echo "DoorNet2 R3 stable build finished"
           echo "========================================"
 
           echo
@@ -4828,9 +4828,12 @@ jobs:
               | head -n 1
           )"
 
+          # iptables 1.8.x installs ip6tables as a multicall symlink to
+          # xtables-legacy-multi on this LEDE tree. Accept either a real file
+          # or a symlink here; the old "-type f" check produced a false failure.
           ROOT_IP6TABLES="$(
             find build_dir \
-              -type f \
+              \( -type f -o -type l \) \
               -path '*/root-*/usr/sbin/ip6tables' \
               -print \
               | head -n 1
@@ -4842,13 +4845,41 @@ jobs:
           fi
 
           if [ -z "$ROOT_IP6TABLES" ]; then
-              echo "ERROR: ip6tables binary is missing from the firmware rootfs."
-              find build_dir -type f -path '*/root-*/usr/sbin/ip6tables*' -print | head -20
+              echo "ERROR: ip6tables path is missing from the firmware rootfs."
+              find build_dir \
+                \( -type f -o -type l \) \
+                -path '*/root-*/usr/sbin/ip6tables*' \
+                -print \
+                | head -30
               exit 1
           fi
 
+          if [ -L "$ROOT_IP6TABLES" ]; then
+              ROOTFS_DIR="${ROOT_IP6TABLES%%/usr/sbin/ip6tables}"
+              LINK_TARGET="$(readlink "$ROOT_IP6TABLES")"
+
+              case "$LINK_TARGET" in
+                  /*)
+                      RESOLVED_TARGET="${ROOTFS_DIR}${LINK_TARGET}"
+                      ;;
+                  *)
+                      RESOLVED_TARGET="$(dirname "$ROOT_IP6TABLES")/${LINK_TARGET}"
+                      ;;
+              esac
+
+              if [ ! -e "$RESOLVED_TARGET" ]; then
+                  echo "ERROR: ip6tables symlink target is missing: $LINK_TARGET"
+                  echo "Resolved target: $RESOLVED_TARGET"
+                  exit 1
+              fi
+
+              echo "Rootfs ip6tables symlink: $ROOT_IP6TABLES -> $LINK_TARGET"
+              echo "Rootfs ip6tables target : $RESOLVED_TARGET"
+          else
+              echo "Rootfs ip6tables binary : $ROOT_IP6TABLES"
+          fi
+
           echo "Rootfs Xray      : $ROOT_XRAY"
-          echo "Rootfs ip6tables : $ROOT_IP6TABLES"
 
           test -x files/usr/bin/doornet2-passwall-updater
           sh -n files/usr/bin/doornet2-passwall-updater
@@ -4905,7 +4936,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R2 DESIGN + QUICKSTART UI ====="
+          echo "===== R3 DESIGN + QUICKSTART UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-design-dark-v1'" \
@@ -5013,7 +5044,7 @@ jobs:
 
 
           echo
-          echo "===== R2 TIME / CPU TEMP POLICY ====="
+          echo "===== R3 TIME / CPU TEMP POLICY ====="
 
           grep -q \
             "DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'" \
@@ -5028,7 +5059,7 @@ jobs:
           sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
 
           # Thermal support is intentionally left to the existing RK3399/
-          # LuCI status stack. R2 adds no floating monitor frontend.
+          # LuCI status stack. R3 adds no floating monitor frontend.
 
 
           echo
@@ -5055,5 +5086,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R2 STABLE + PASSWALL + DESIGN + ONLINE APPS + CAPACITY PATCH SUCCESS"
+          echo "R3 STABLE + PASSWALL + DESIGN + ONLINE APPS + CAPACITY PATCH SUCCESS"
           echo "========================================"
