@@ -669,6 +669,77 @@ jobs:
           /etc/smartdns/
           EOF
 
+          # AdGuard filter defaults are applied non-destructively after the
+          # user's normal first-run setup creates /etc/adguardhome.yaml.
+          # Existing user filter choices are preserved; only anti-AD is added
+          # when it is missing. AdGuard Home's clean-install defaults keep
+          # AdGuard DNS filter enabled and AdAway disabled.
+          cat > files/usr/bin/doornet2-adguard-filter-defaults <<'EOF'
+          #!/bin/sh
+
+          CFG='/etc/adguardhome.yaml'
+          ANTI_URL='https://anti-ad.net/easylist.txt'
+
+          [ -s "$CFG" ] || exit 0
+          grep -Fq "$ANTI_URL" "$CFG" && exit 0
+
+          TMP="/tmp/adguardhome.yaml.doornet2.$$"
+          WAS_RUNNING=0
+
+          if pidof AdGuardHome >/dev/null 2>&1; then
+              WAS_RUNNING=1
+              /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
+              sleep 1
+          fi
+
+          awk '
+          BEGIN { inserted = 0 }
+          /^filters:[[:space:]]*\[\][[:space:]]*$/ && !inserted {
+              print "filters:"
+              print "  - enabled: true"
+              print "    url: https://anti-ad.net/easylist.txt"
+              print "    name: anti-AD"
+              print "    id: 900001"
+              inserted = 1
+              next
+          }
+          /^filters:[[:space:]]*$/ && !inserted {
+              print
+              print "  - enabled: true"
+              print "    url: https://anti-ad.net/easylist.txt"
+              print "    name: anti-AD"
+              print "    id: 900001"
+              inserted = 1
+              next
+          }
+          { print }
+          END {
+              if (!inserted) {
+                  print "filters:"
+                  print "  - enabled: true"
+                  print "    url: https://anti-ad.net/easylist.txt"
+                  print "    name: anti-AD"
+                  print "    id: 900001"
+              }
+          }
+          ' "$CFG" >"$TMP"
+
+          if grep -Fq "$ANTI_URL" "$TMP"; then
+              cat "$TMP" >"$CFG"
+              sync
+          fi
+          rm -f "$TMP"
+
+          if [ "$WAS_RUNNING" = '1' ]; then
+              /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-adguard-filter-defaults
+          sh -n files/usr/bin/doornet2-adguard-filter-defaults
+
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
 
@@ -719,9 +790,12 @@ jobs:
           fi
 
           # If AdGuard was retained from an earlier install, bring it back.
-          # Otherwise leave first-run setup untouched.
+          # Otherwise leave first-run setup untouched.  The filter helper only
+          # adds anti-AD when missing and never overwrites an existing list.
           if [ -x /etc/init.d/adguardhome ]; then
               if [ -s /etc/adguardhome.yaml ]; then
+                  [ -x /usr/bin/doornet2-adguard-filter-defaults ] && \
+                    /usr/bin/doornet2-adguard-filter-defaults >/dev/null 2>&1 || true
                   /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
                   /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
               else
@@ -1448,6 +1522,9 @@ jobs:
           fi
 
           if [ -s /etc/adguardhome.yaml ] && /etc/init.d/adguardhome enabled >/dev/null 2>&1; then
+              [ -x /usr/bin/doornet2-adguard-filter-defaults ] && \
+                /usr/bin/doornet2-adguard-filter-defaults >>"$LOG" 2>&1 || true
+
               if port_ready 3053; then
                   clear_fail adguard
               elif second_fail adguard; then
@@ -1976,7 +2053,7 @@ jobs:
           DOORNET2_PASSWALL_DELAY='route-aware-v1'
           DOORNET2_UU_DELAY='route-aware-retry-v1'
           DOORNET2_HEALTH='selfcheck-selfheal-v2'
-          DOORNET2_FINAL_PROFILE='stable-final-solidified-v1'
+          DOORNET2_FINAL_PROFILE='stable-final-solidified-v2-adblock'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
           DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
@@ -5333,7 +5410,7 @@ jobs:
             "passwall_delay": "route-aware-v1",
             "uu_delay": "route-aware-retry-v1",
             "health_check": "selfcheck-selfheal-v2",
-            "profile": "stable-final-solidified-v1",
+            "profile": "stable-final-solidified-v2-adblock",
             "release": "R4"
           }
           EOF
@@ -5436,6 +5513,9 @@ jobs:
           - Tested upstreams: 223.5.5.5 and 119.29.29.29
           - SmartDNS does not auto-edit dnsmasq
           - AdGuard Home keeps normal first-run user/password setup
+          - AdGuard DNS filter remains enabled by the normal clean-install default
+          - AdAway remains disabled by the normal clean-install default
+          - anti-AD (https://anti-ad.net/easylist.txt) is added enabled after first-run setup, without overwriting retained user filters
           - When AdGuard is actually listening on 3053, R4 automatically wires:
             dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
           - PassWall DNS redirect is disabled when this validated chain activates
@@ -6182,6 +6262,10 @@ jobs:
           grep -q "dhcp.lan.dhcpv6='disabled'" files/etc/uci-defaults/93-doornet2-ipv4-only
 
           test -s files/etc/sysupgrade.conf
+          test -x files/usr/bin/doornet2-adguard-filter-defaults
+          sh -n files/usr/bin/doornet2-adguard-filter-defaults
+          grep -q 'https://anti-ad.net/easylist.txt' files/usr/bin/doornet2-adguard-filter-defaults
+
           grep -q '^/etc/adguardhome.yaml$' files/etc/sysupgrade.conf
           grep -q '^/etc/config/passwall$' files/etc/sysupgrade.conf
           grep -q '^/etc/config/uuplugin$' files/etc/sysupgrade.conf
