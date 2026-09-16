@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified
+name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v3
 
 on:
   workflow_dispatch:
@@ -610,7 +610,8 @@ jobs:
           mkdir -p \
             files/etc/uci-defaults \
             files/etc/init.d \
-            files/etc/smartdns
+            files/etc/smartdns \
+            files/usr/bin
 
           cat > files/etc/uci-defaults/93-doornet2-ipv4-only <<'EOF'
           #!/bin/sh
