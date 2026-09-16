@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4
+name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified
 
 on:
   workflow_dispatch:
@@ -421,6 +421,36 @@ jobs:
             "$TMP_UU/src/luci-app-uugamebooster" \
             package/doornet2/luci-app-uugamebooster
 
+          # DoorNet2 RK3399 is aarch64. Force NetEase's generic OpenWrt
+          # runtime instead of the H3C NX30 Pro compatibility runtime.
+          # The generic runtime is the version validated on R4: the UU app
+          # only exposes game consoles (Switch/PlayStation/Xbox) rather than
+          # ordinary Android/PC/LAN clients.
+          UU_INIT="$(
+            grep -RIl \
+              '^aarch64uurl=' \
+              package/doornet2/luci-app-uugamebooster \
+              | head -n 1
+          )"
+
+          test -n "$UU_INIT"
+
+          sed -i \
+            's#^aarch64uurl=.*#aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"#' \
+            "$UU_INIT"
+
+          grep -q \
+            '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' \
+            "$UU_INIT"
+
+          if grep -q '^aarch64uurl=.*h3c-nx30pro' "$UU_INIT"; then
+              echo "ERROR: UU aarch64 runtime still points to h3c-nx30pro"
+              exit 1
+          fi
+
+          echo "===== DOORNET2 UU GENERIC AARCH64 ====="
+          grep -n '^aarch64uurl=' "$UU_INIT"
+
           rm -rf "$TMP_UU"
 
           echo "===== VERIFY NETWORK APP SOURCES ====="
@@ -579,7 +609,65 @@ jobs:
 
           mkdir -p \
             files/etc/uci-defaults \
-            files/etc/init.d
+            files/etc/init.d \
+            files/etc/smartdns
+
+          cat > files/etc/uci-defaults/93-doornet2-ipv4-only <<'EOF'
+          #!/bin/sh
+
+          # DoorNet2 R4 validated IPv4-only policy.
+          # Keep IPv6 userspace/kernel compatibility packages installed for
+          # PassWall/firewall3 compatibility, but do not obtain or advertise
+          # IPv6 on WAN/LAN. Existing IPv4 settings are left untouched.
+
+          if uci -q get network.wan6 >/dev/null 2>&1; then
+              uci -q set network.wan6.auto='0'
+              uci -q set network.wan6.disabled='1'
+          fi
+
+          uci -q delete network.lan.ip6assign
+          uci -q delete network.lan.ip6hint
+          uci -q delete network.globals.ula_prefix
+          uci -q commit network
+
+          if uci -q get dhcp.lan >/dev/null 2>&1; then
+              uci -q set dhcp.lan.ra='disabled'
+              uci -q set dhcp.lan.dhcpv6='disabled'
+              uci -q set dhcp.lan.ndp='disabled'
+              uci -q delete dhcp.lan.ra_flags
+              uci -q delete dhcp.lan.dns
+              uci -q commit dhcp
+          fi
+
+          if [ -x /etc/init.d/odhcpd ]; then
+              /etc/init.d/odhcpd disable >/dev/null 2>&1 || true
+              /etc/init.d/odhcpd stop >/dev/null 2>&1 || true
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/93-doornet2-ipv4-only
+          sh -n files/etc/uci-defaults/93-doornet2-ipv4-only
+
+          # Explicit persistence policy for retained sysupgrades. Standard UCI
+          # files are already preserved by OpenWrt; these entries make the R4
+          # contract explicit and also retain AdGuard/SmartDNS non-UCI data.
+          cat > files/etc/sysupgrade.conf <<'EOF'
+          /etc/config/network
+          /etc/config/dhcp
+          /etc/config/firewall
+          /etc/config/system
+          /etc/config/dropbear
+          /etc/config/luci
+          /etc/config/design
+          /etc/config/passwall
+          /etc/config/uuplugin
+          /etc/config/smartdns
+          /etc/config/adguardhome
+          /etc/adguardhome.yaml
+          /etc/smartdns/
+          EOF
 
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
@@ -791,8 +879,23 @@ jobs:
               uci -q commit passwall
           fi
 
-          # Do not overwrite a previously customized R4 preset.
+          # R4 system-owned forced-direct rule. Apply it even on a retained
+          # sysupgrade so the new firmware can add these safe direct domains
+          # without overwriting the user's other shunt/node selections.
+          uci -q delete passwall.DN_ForcedDirect
+          uci -q set passwall.DN_ForcedDirect='shunt_rules'
+          uci -q set passwall.DN_ForcedDirect.remarks='DoorNet2 强制直连'
+          uci -q set passwall.DN_ForcedDirect.network='tcp,udp'
+          uci -q set "passwall.DN_ForcedDirect.domain_list=api.example.com
+          domain:speedtest.net
+          domain:router.uu.163.com
+          domain:uu.gdl.netease.com"
+
+          # Do not overwrite a previously customized R4 preset. Only attach the
+          # system direct rule to it, then leave every other dropdown untouched.
           if [ "$(uci -q get passwall.R4Shunt.remarks)" = "R4 分流总节点" ]; then
+              uci -q set passwall.R4Shunt.DN_ForcedDirect='_direct'
+              uci -q commit passwall
               exit 0
           fi
 
@@ -943,7 +1046,8 @@ jobs:
             DN_Netflix DN_DisneyPlus DN_MaxHBO DN_PrimeVideo DN_Spotify DN_TikTok \
             DN_Apple DN_Microsoft DN_GitHub DN_Slack DN_Zoom DN_Notion DN_Dropbox \
             DN_PlayStation DN_Nintendo DN_Xbox \
-            DN_LocalMedia DN_AIGC DN_Streaming DN_ProxyGame DN_DirectGame
+            DN_LocalMedia DN_AIGC DN_Streaming DN_ProxyGame DN_DirectGame \
+            DN_ForcedDirect
           do
               uci -q set "passwall.R4Shunt.${rule}=_direct"
           done
@@ -1013,7 +1117,7 @@ jobs:
 
           echo "===== R4 PASSWALL PRESETS ====="
           grep -nE \
-            'R4Shunt|DN_WeChat|DN_LINE|DN_OpenAI|DN_Netflix|DN_AIGC|DN_Streaming' \
+            'R4Shunt|DN_ForcedDirect|speedtest\.net|api\.example\.com|DN_WeChat|DN_LINE|DN_OpenAI|DN_Netflix|DN_AIGC|DN_Streaming' \
             files/etc/uci-defaults/96-doornet2-passwall-shunt \
             | head -100
 
@@ -1046,7 +1150,8 @@ jobs:
               (
                   echo "$(date '+%Y-%m-%d %H:%M:%S') R4 UU guard starting" >"$LOG"
 
-                  ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+                  ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
+                  [ -n "$ENABLED" ] || ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
                   if [ "$ENABLED" != "1" ]; then
                       echo "$(date '+%Y-%m-%d %H:%M:%S') UU disabled; no restart needed" >>"$LOG"
                       exit 0
@@ -1097,7 +1202,7 @@ jobs:
           #!/bin/sh
 
           # These guards are inert when their corresponding app is disabled.
-          for svc in passwall-delay doornet2-dns-chain uu-delay; do
+          for svc in passwall-delay doornet2-dns-chain uu-delay doornet2-selfheal; do
               if [ -x "/etc/init.d/$svc" ]; then
                   "/etc/init.d/$svc" enable >/dev/null 2>&1 || true
               fi
@@ -1133,7 +1238,7 @@ jobs:
           echo "===== RELEASE ====="
           if [ -r /etc/doornet2_release ]; then
               grep -E \
-                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH)=" \
+                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IPV4_ONLY|UU_RUNTIME|PERSISTENCE|SELFHEAL)=" \
                 /etc/doornet2_release 2>/dev/null || true
           else
               warn "/etc/doornet2_release missing"
@@ -1226,8 +1331,17 @@ jobs:
           netstat -lntp 2>/dev/null | grep -E ':1080|:1081' || true
 
           echo
+          echo "===== IPv4-ONLY ====="
+          info "wan6.auto=$(uci -q get network.wan6.auto)"
+          info "wan6.disabled=$(uci -q get network.wan6.disabled)"
+          info "lan.ip6assign=$(uci -q get network.lan.ip6assign)"
+          info "lan.ra=$(uci -q get dhcp.lan.ra)"
+          info "lan.dhcpv6=$(uci -q get dhcp.lan.dhcpv6)"
+
+          echo
           echo "===== UU ====="
-          UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+          UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
+          [ -n "$UU_ENABLED" ] || UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
           info "enabled=${UU_ENABLED:-0}"
 
           if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin ' | grep -v grep >/dev/null 2>&1; then
@@ -1238,7 +1352,7 @@ jobs:
 
           echo
           echo "===== BOOT GUARDS ====="
-          for svc in passwall-delay doornet2-dns-chain uu-delay; do
+          for svc in passwall-delay doornet2-dns-chain uu-delay doornet2-selfheal; do
               if [ -x "/etc/init.d/$svc" ]; then
                   /etc/init.d/"$svc" enabled >/dev/null 2>&1 \
                     && ok "$svc enabled" \
@@ -1270,10 +1384,165 @@ jobs:
           chmod 755 files/usr/bin/doornet2-health
           sh -n files/usr/bin/doornet2-health
 
+          cat > files/usr/bin/doornet2-heal <<'EOF'
+          #!/bin/sh
+
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+          LOG="/tmp/doornet2-selfheal.log"
+          STATE_DIR="/tmp/doornet2-selfheal"
+          mkdir -p "$STATE_DIR"
+
+          log_msg()
+          {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"
+              SIZE="$(wc -c <"$LOG" 2>/dev/null)"
+              case "$SIZE" in ''|*[!0-9]*) SIZE=0 ;; esac
+              if [ "$SIZE" -ge 131072 ]; then
+                  tail -n 400 "$LOG" >"${LOG}.tmp"
+                  mv "${LOG}.tmp" "$LOG"
+              fi
+          }
+
+          clear_fail()
+          {
+              rm -f "$STATE_DIR/$1"
+          }
+
+          second_fail()
+          {
+              key="$1"
+              n=0
+              [ -r "$STATE_DIR/$key" ] && n="$(cat "$STATE_DIR/$key" 2>/dev/null)"
+              case "$n" in ''|*[!0-9]*) n=0 ;; esac
+              n=$((n + 1))
+              echo "$n" >"$STATE_DIR/$key"
+              [ "$n" -ge 2 ]
+          }
+
+          port_ready()
+          {
+              netstat -lnptu 2>/dev/null | grep -E "[:.]$1[[:space:]]" >/dev/null 2>&1
+          }
+
+          log_msg "self-heal check started mode=${1:-manual}"
+
+          # A missing default route is reported but never triggers a whole-network
+          # restart. This avoids PPPoE flapping; service repair resumes as soon as
+          # WAN routing returns.
+          if ! ip route 2>/dev/null | grep -q '^default '; then
+              log_msg "WARN no default route; defer service repair"
+              exit 2
+          fi
+
+          if [ "$(uci -q get smartdns.@smartdns[0].enabled)" = "1" ]; then
+              if port_ready 6053; then
+                  clear_fail smartdns
+              elif second_fail smartdns; then
+                  log_msg "repair SmartDNS :6053"
+                  /etc/init.d/smartdns restart >>"$LOG" 2>&1 || true
+                  clear_fail smartdns
+              else
+                  log_msg "SmartDNS miss 1/2"
+              fi
+          fi
+
+          if [ -s /etc/adguardhome.yaml ] && /etc/init.d/adguardhome enabled >/dev/null 2>&1; then
+              if port_ready 3053; then
+                  clear_fail adguard
+              elif second_fail adguard; then
+                  log_msg "repair AdGuard Home :3053"
+                  /etc/init.d/adguardhome restart >>"$LOG" 2>&1 || true
+                  clear_fail adguard
+              else
+                  log_msg "AdGuard miss 1/2"
+              fi
+          fi
+
+          if command -v nslookup >/dev/null 2>&1; then
+              if nslookup www.baidu.com 127.0.0.1 >/dev/null 2>&1; then
+                  clear_fail dns
+              elif second_fail dns; then
+                  log_msg "repair DNS chain/dnsmasq"
+                  /etc/init.d/doornet2-dns-chain restart >>"$LOG" 2>&1 || true
+                  sleep 3
+                  /etc/init.d/dnsmasq restart >>"$LOG" 2>&1 || true
+                  clear_fail dns
+              else
+                  log_msg "DNS query miss 1/2"
+              fi
+          fi
+
+          if [ "$(uci -q get passwall.@global[0].enabled)" = "1" ]; then
+              if ps w 2>/dev/null | grep '[x]ray' >/dev/null 2>&1; then
+                  clear_fail passwall
+              elif second_fail passwall; then
+                  log_msg "repair PassWall/Xray"
+                  /etc/init.d/passwall restart >>"$LOG" 2>&1 || true
+                  clear_fail passwall
+              else
+                  log_msg "PassWall miss 1/2"
+              fi
+          fi
+
+          UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
+          [ -n "$UU_ENABLED" ] || UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+          if [ "$UU_ENABLED" = "1" ]; then
+              if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin ' | grep -v grep >/dev/null 2>&1; then
+                  clear_fail uu
+              elif second_fail uu; then
+                  log_msg "repair UU runtime"
+                  /etc/init.d/uuplugin restart >>"$LOG" 2>&1 || true
+                  clear_fail uu
+              else
+                  log_msg "UU miss 1/2"
+              fi
+          fi
+
+          log_msg "self-heal check complete"
+          exit 0
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-heal
+          sh -n files/usr/bin/doornet2-heal
+
+          cat > files/usr/bin/doornet2-selfheal-loop <<'EOF'
+          #!/bin/sh
+          sleep 120
+          while true; do
+              /usr/bin/doornet2-heal auto >/dev/null 2>&1 || true
+              sleep 300
+          done
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-selfheal-loop
+          sh -n files/usr/bin/doornet2-selfheal-loop
+
+          cat > files/etc/init.d/doornet2-selfheal <<'EOF'
+          #!/bin/sh /etc/rc.common
+
+          START=99
+          STOP=10
+          USE_PROCD=1
+
+          start_service()
+          {
+              procd_open_instance
+              procd_set_param command /usr/bin/doornet2-selfheal-loop
+              procd_set_param respawn 3600 5 5
+              procd_close_instance
+          }
+          EOF
+
+          chmod 755 files/etc/init.d/doornet2-selfheal
+          sh -n files/etc/init.d/doornet2-selfheal
+
           echo "===== R4 FINAL HELPERS ====="
           test -x files/etc/init.d/uu-delay
+          test -x files/etc/init.d/doornet2-selfheal
           test -x files/etc/uci-defaults/94-doornet2-final-helpers
           test -x files/usr/bin/doornet2-health
+          test -x files/usr/bin/doornet2-heal
 
 
       # ============================================================
@@ -1701,14 +1970,18 @@ jobs:
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
           DOORNET2_UI='quickstart-design-dark-v1'
           DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'
-          DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-runtime-online-v3'
-          DOORNET2_SHUNT='preset-rules-clean-v2'
+          DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-generic-online-v4'
+          DOORNET2_SHUNT='preset-rules-forced-direct-v3'
           DOORNET2_DNS_CHAIN='adguard-smartdns-auto-v1'
           DOORNET2_PASSWALL_DELAY='route-aware-v1'
           DOORNET2_UU_DELAY='route-aware-retry-v1'
-          DOORNET2_HEALTH='cli-selfcheck-v1'
-          DOORNET2_FINAL_PROFILE='stable-final-clean-shunt-v2'
+          DOORNET2_HEALTH='selfcheck-selfheal-v2'
+          DOORNET2_FINAL_PROFILE='stable-final-solidified-v1'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
+          DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
+          DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
+          DOORNET2_PERSISTENCE='sysupgrade-explicit-v1'
+          DOORNET2_SELFHEAL='service-aware-two-strike-v1'
           EOF
 
           cat files/etc/doornet2_release
@@ -5048,15 +5321,19 @@ jobs:
             "extroot": false,
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
-            "network_apps": "passwall-smartdns-adguard-chain-uu-runtime-online-v3",
+            "network_apps": "passwall-smartdns-adguard-chain-uu-generic-online-v4",
             "ui": "quickstart-design-dark-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
-            "shunt_presets": "preset-rules-clean-v2",
+            "ipv4_only": "wan6-ra-dhcpv6-disabled-v1",
+            "uu_runtime": "openwrt-aarch64-console-only-v1",
+            "persistence": "sysupgrade-explicit-v1",
+            "self_heal": "service-aware-two-strike-v1",
+            "shunt_presets": "preset-rules-forced-direct-v3",
             "dns_chain": "adguard-smartdns-auto-v1",
             "passwall_delay": "route-aware-v1",
             "uu_delay": "route-aware-retry-v1",
-            "health_check": "cli-selfcheck-v1",
-            "profile": "stable-final-clean-shunt-v2",
+            "health_check": "selfcheck-selfheal-v2",
+            "profile": "stable-final-solidified-v1",
             "release": "R4"
           }
           EOF
@@ -5126,7 +5403,12 @@ jobs:
           - UU has a route-aware 3-attempt restart guard when UU is enabled
           - AdGuard/SmartDNS DNS-chain helper waits for real :3053 readiness
           - /usr/bin/doornet2-health provides a read-only whole-system self-check
-          - No personal proxy node IDs or AdGuard password are baked into firmware
+          - /usr/bin/doornet2-heal + doornet2-selfheal provide conservative two-strike service recovery
+          - IPv4-only defaults disable wan6 auto-start, LAN RA/DHCPv6/NDP and IPv6 DNS advertisement
+          - UU aarch64 runtime is pinned to NetEase openwrt-aarch64 generic mode (console-only discovery)
+          - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints
+          - /etc/sysupgrade.conf explicitly retains network/PassWall/UU/SmartDNS/AdGuard user configuration
+          - No personal PPPoE credentials, proxy node IDs or AdGuard password are baked into firmware
 
           R4 built-in PassWall shunt presets:
 
@@ -5680,7 +5962,7 @@ jobs:
           echo "===== ONLINE NETWORK APPS ====="
 
           grep -q \
-            "DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-runtime-online-v3'" \
+            "DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-generic-online-v4'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
@@ -5883,6 +6165,33 @@ jobs:
 
 
           echo
+          echo "===== R4 FINAL SOLIDIFIED POLICY ====="
+
+          grep -Rqs \
+            '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' \
+            package/doornet2/luci-app-uugamebooster
+
+          grep -q 'api.example.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'domain:speedtest.net' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'domain:router.uu.163.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'domain:uu.gdl.netease.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
+
+          test -x files/etc/uci-defaults/93-doornet2-ipv4-only
+          sh -n files/etc/uci-defaults/93-doornet2-ipv4-only
+          grep -q "dhcp.lan.ra='disabled'" files/etc/uci-defaults/93-doornet2-ipv4-only
+          grep -q "dhcp.lan.dhcpv6='disabled'" files/etc/uci-defaults/93-doornet2-ipv4-only
+
+          test -s files/etc/sysupgrade.conf
+          grep -q '^/etc/adguardhome.yaml$' files/etc/sysupgrade.conf
+          grep -q '^/etc/config/passwall$' files/etc/sysupgrade.conf
+          grep -q '^/etc/config/uuplugin$' files/etc/sysupgrade.conf
+
+          test -x files/usr/bin/doornet2-heal
+          test -x files/etc/init.d/doornet2-selfheal
+          sh -n files/usr/bin/doornet2-heal
+          sh -n files/etc/init.d/doornet2-selfheal
+
+          echo
           echo "===== EXTROOT ====="
 
           cat files/etc/config/fstab
@@ -5906,5 +6215,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R4 FINAL + SHUNT + DNS CHAIN + PASSWALL + UU GUARD + DESIGN + CAPACITY SUCCESS"
+          echo "R4 FINAL SOLIDIFIED + GENERIC UU + IPv4-ONLY + SELFHEAL + PERSISTENCE SUCCESS"
           echo "========================================"
