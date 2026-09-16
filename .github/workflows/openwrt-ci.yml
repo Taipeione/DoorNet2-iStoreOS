@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v3
+name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v4
 
 on:
   workflow_dispatch:
@@ -672,8 +672,8 @@ jobs:
 
           # AdGuard filter defaults are applied non-destructively after the
           # user's normal first-run setup creates /etc/adguardhome.yaml.
-          # Existing user filter choices are preserved; only anti-AD is added
-          # when it is missing. AdGuard Home's clean-install defaults keep
+          # Existing user filter choices are preserved; anti-AD is preloaded
+          # when it is missing but remains disabled by default. AdGuard Home's clean-install defaults keep
           # AdGuard DNS filter enabled and AdAway disabled.
           cat > files/usr/bin/doornet2-adguard-filter-defaults <<'EOF'
           #!/bin/sh
@@ -697,7 +697,7 @@ jobs:
           BEGIN { inserted = 0 }
           /^filters:[[:space:]]*\[\][[:space:]]*$/ && !inserted {
               print "filters:"
-              print "  - enabled: true"
+              print "  - enabled: false"
               print "    url: https://anti-ad.net/easylist.txt"
               print "    name: anti-AD"
               print "    id: 900001"
@@ -706,7 +706,7 @@ jobs:
           }
           /^filters:[[:space:]]*$/ && !inserted {
               print
-              print "  - enabled: true"
+              print "  - enabled: false"
               print "    url: https://anti-ad.net/easylist.txt"
               print "    name: anti-AD"
               print "    id: 900001"
@@ -717,7 +717,7 @@ jobs:
           END {
               if (!inserted) {
                   print "filters:"
-                  print "  - enabled: true"
+                  print "  - enabled: false"
                   print "    url: https://anti-ad.net/easylist.txt"
                   print "    name: anti-AD"
                   print "    id: 900001"
@@ -966,10 +966,76 @@ jobs:
           domain:router.uu.163.com
           domain:uu.gdl.netease.com"
 
-          # Do not overwrite a previously customized R4 preset. Only attach the
-          # system direct rule to it, then leave every other dropdown untouched.
+          # High-priority ChatGPT login path. OpenAI's login flow also uses
+          # WorkOS, Cloudflare challenge, Stripe/Intercom telemetry endpoints
+          # and one Apple endpoint. Keep the whole login transaction on the
+          # same proxy egress as DN_OpenAI to avoid mixed-exit login failures.
+          uci -q delete passwall.DN_ChatGPT_Login
+          uci -q set passwall.DN_ChatGPT_Login='shunt_rules'
+          uci -q set passwall.DN_ChatGPT_Login.remarks='ChatGPT 登录完整链路'
+          uci -q set passwall.DN_ChatGPT_Login.network='tcp,udp'
+          uci -q set "passwall.DN_ChatGPT_Login.domain_list=domain:auth.openai.com
+          domain:chatgpt.com
+          domain:ct.sendgrid.net
+          domain:intercom.io
+          domain:intercomcdn.com
+          domain:oaistatic.com
+          domain:oaiusercontent.com
+          domain:openai.com
+          domain:oaistatsig.com
+          auth0.openai.com
+          cdn.openaimerge.com
+          cdn.workos.com
+          challenges.cloudflare.com
+          forwarder.workos.com
+          humb.apple.com
+          images.workoscdn.com
+          js.intercomcdn.com
+          js.stripe.com
+          o207216.ingest.sentry.io
+          o33249.ingest.sentry.io
+          rum.browser-intake-datadoghq.com
+          setup.auth.openai.com
+          setup.workos.com
+          workos.imgix.net"
+
+          # Keep system-owned safety/login rules ahead of broad service rules.
+          uci -q reorder passwall.DN_ForcedDirect=0 >/dev/null 2>&1 || true
+          uci -q reorder passwall.DN_ChatGPT_Login=1 >/dev/null 2>&1 || true
+
+          # Broad umbrella rows stay visible but must not overlap the dedicated
+          # per-service rules. Clear only the stock DoorNet2 definitions.
+          if [ "$(uci -q get passwall.DN_AIGC.remarks)" = "AIGC" ]; then
+              uci -q delete passwall.DN_AIGC.domain_list
+              uci -q delete passwall.DN_AIGC.ip_list
+          fi
+          if [ "$(uci -q get passwall.DN_Streaming.remarks)" = "Streaming" ]; then
+              uci -q delete passwall.DN_Streaming.domain_list
+              uci -q delete passwall.DN_Streaming.ip_list
+          fi
+          if [ "$(uci -q get passwall.DN_ProxyGame.remarks)" = "ProxyGame" ]; then
+              uci -q delete passwall.DN_ProxyGame.domain_list
+              uci -q delete passwall.DN_ProxyGame.ip_list
+          fi
+
+          # Do not overwrite a previously customized R4 preset. Attach the
+          # system direct rule and, when possible, inherit DN_OpenAI's concrete
+          # node for the ChatGPT login path. Leave all other dropdowns untouched.
           if [ "$(uci -q get passwall.R4Shunt.remarks)" = "R4 分流总节点" ]; then
               uci -q set passwall.R4Shunt.DN_ForcedDirect='_direct'
+
+              if [ -z "$(uci -q get passwall.R4Shunt.DN_ChatGPT_Login)" ]; then
+                  OPENAI_NODE="$(uci -q get passwall.R4Shunt.DN_OpenAI)"
+                  case "$OPENAI_NODE" in
+                      ""|_direct|_default|_blackhole)
+                          :
+                          ;;
+                      *)
+                          uci -q set "passwall.R4Shunt.DN_ChatGPT_Login=$OPENAI_NODE"
+                          ;;
+                  esac
+              fi
+
               uci -q commit passwall
               exit 0
           fi
@@ -1046,7 +1112,7 @@ jobs:
 
           # AI
           add_rule DN_OpenAI "OpenAI / ChatGPT" \
-            "openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com" ""
+            "openai.com,chatgpt.com,auth.openai.com,oaistatic.com,oaiusercontent.com,oaistatsig.com" ""
           add_rule DN_Claude "Claude / Anthropic" \
             "claude.ai,anthropic.com" ""
           add_rule DN_Perplexity "Perplexity" "perplexity.ai" ""
@@ -1093,17 +1159,15 @@ jobs:
           # Local media + umbrella rules
           add_rule DN_LocalMedia "Emby / Jellyfin / Plex" \
             "emby.media,jellyfin.org,plex.tv" ""
-          add_rule DN_AIGC "AIGC" \
-            "openai.com,chatgpt.com,claude.ai,anthropic.com,gemini.google.com,perplexity.ai,copilot.microsoft.com,grok.com,x.ai" ""
-          add_rule DN_Streaming "Streaming" \
-            "youtube.com,netflix.com,disneyplus.com,max.com,hbomax.com,primevideo.com,spotify.com,tiktok.com" ""
-          add_rule DN_ProxyGame "ProxyGame" \
-            "playstation.com,playstation.net,nintendo.com,nintendo.net,xbox.com,xboxlive.com" ""
+          add_rule DN_AIGC "AIGC（汇总备用）" "" ""
+          add_rule DN_Streaming "Streaming（汇总备用）" "" ""
+          add_rule DN_ProxyGame "ProxyGame（汇总备用）" "" ""
           add_rule DN_DirectGame "DirectGame" "" ""
 
           # Create the shunt framework without embedding any personal node ID.
-          # Every rule starts as direct. After importing nodes, the user only
-          # needs to choose the desired node in the R4Shunt dropdowns.
+          # Every ordinary preset row starts unused (no mapping). The user
+          # explicitly selects a node per service. Only the system-owned
+          # DN_ForcedDirect rule is active by default.
           uci -q delete passwall.R4Shunt
           uci -q set passwall.R4Shunt='nodes'
           uci -q set passwall.R4Shunt.remarks='R4 分流总节点'
@@ -1112,20 +1176,9 @@ jobs:
           uci -q set passwall.R4Shunt.domainStrategy='IPOnDemand'
           uci -q set passwall.R4Shunt.default_node='_direct'
 
-          for rule in \
-            DN_WeChat DN_QQ \
-            DN_LINE DN_WhatsApp DN_Signal DN_Telegram DN_Discord \
-            DN_Facebook DN_Instagram DN_XTwitter DN_Reddit \
-            DN_YouTube DN_GoogleAI DN_GmailDrive DN_Google \
-            DN_OpenAI DN_Claude DN_Perplexity DN_Copilot DN_Grok \
-            DN_Netflix DN_DisneyPlus DN_MaxHBO DN_PrimeVideo DN_Spotify DN_TikTok \
-            DN_Apple DN_Microsoft DN_GitHub DN_Slack DN_Zoom DN_Notion DN_Dropbox \
-            DN_PlayStation DN_Nintendo DN_Xbox \
-            DN_LocalMedia DN_AIGC DN_Streaming DN_ProxyGame DN_DirectGame \
-            DN_ForcedDirect
-          do
-              uci -q set "passwall.R4Shunt.${rule}=_direct"
-          done
+          # Ordinary service rules intentionally have no R4Shunt mapping here,
+          # which LuCI presents as unused/not selected on first boot.
+          uci -q set passwall.R4Shunt.DN_ForcedDirect='_direct'
 
           # Do not change the user's current global on/off state or TCP node
           # during a retained sysupgrade.
@@ -1192,7 +1245,7 @@ jobs:
 
           echo "===== R4 PASSWALL PRESETS ====="
           grep -nE \
-            'R4Shunt|DN_ForcedDirect|speedtest\.net|api\.example\.com|DN_WeChat|DN_LINE|DN_OpenAI|DN_Netflix|DN_AIGC|DN_Streaming' \
+            'R4Shunt|DN_ForcedDirect|DN_ChatGPT_Login|speedtest\.net|api\.example\.com|DN_WeChat|DN_LINE|DN_OpenAI|DN_Netflix|DN_AIGC|DN_Streaming' \
             files/etc/uci-defaults/96-doornet2-passwall-shunt \
             | head -100
 
@@ -5488,14 +5541,14 @@ jobs:
           - /etc/sysupgrade.conf explicitly retains network/PassWall/UU/SmartDNS/AdGuard user configuration
           - No personal PPPoE credentials, proxy node IDs or AdGuard password are baked into firmware
 
-          R4 built-in PassWall shunt presets:
+          R4 built-in PassWall shunt presets (v4 login-safe):
 
           - PassWall's stock `myshunt` / "Xray 分流：分流总节点" is removed on
             clean installs so LuCI shows only the DoorNet2 R4 shunt framework
           - On retained upgrades, an untouched stock myshunt is removed, while
             a user-customized legacy myshunt is preserved
 
-          - Preloaded "R4 分流总节点" framework
+          - Preloaded "R4 分流总节点" framework; ordinary preset rows start unused
           - Rules include WeChat, QQ, LINE, WhatsApp, Signal, Telegram,
             Discord, Facebook, Instagram, X/Twitter, Reddit, Google,
             YouTube, Google AI/Gemini, Gmail/Drive, OpenAI/ChatGPT,
@@ -5516,7 +5569,7 @@ jobs:
           - AdGuard Home keeps normal first-run user/password setup
           - AdGuard DNS filter remains enabled by the normal clean-install default
           - AdAway remains disabled by the normal clean-install default
-          - anti-AD (https://anti-ad.net/easylist.txt) is added enabled after first-run setup, without overwriting retained user filters
+          - anti-AD (https://anti-ad.net/easylist.txt) is preloaded disabled after first-run setup, without overwriting retained user filters
           - When AdGuard is actually listening on 3053, R4 automatically wires:
             dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
           - PassWall DNS redirect is disabled when this validated chain activates
