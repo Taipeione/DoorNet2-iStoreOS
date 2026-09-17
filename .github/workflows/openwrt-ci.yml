@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-V5.2-Final
+name: DoorNet2-OpenWrt-iStore-R4-V5.3-Final-DualStack-Argon
 
 on:
   workflow_dispatch:
@@ -530,7 +530,7 @@ jobs:
           test ! -e package/feeds/luci/luci-app-uugamebooster
 
 
-      - name: Add QuickStart as optional app and use official LuCI Bootstrap
+      - name: Add QuickStart and Argon UI
         run: |
           set -e
 
@@ -572,17 +572,22 @@ jobs:
 
           echo "QuickStart stays installed as an optional application only."
 
-          # Remove custom-theme sources if the base tree happens to carry them.
-          # V5.2 intentionally ships only the standard LuCI Bootstrap shell.
+          # Remove stale custom theme copies, then add the official Argon v2.4.7 source.
           rm -rf \
             package/lean/luci-theme-design \
             package/lean/luci-theme-argon \
-            package/lean/luci-app-argon-config
+            package/lean/luci-app-argon-config \
+            package/doornet2/luci-theme-argon
 
-          echo "No Design/Argon theme sources are included; LuCI Bootstrap is the shell."
+          git clone --depth 1 --branch v2.4.7 \
+            https://github.com/jerrykuku/luci-theme-argon.git \
+            package/doornet2/luci-theme-argon
+
+          test -f package/doornet2/luci-theme-argon/Makefile
+          echo "Argon v2.4.7 source added; Bootstrap remains installed as fallback."
 
 
-      - name: Configure DoorNet2 official LuCI defaults
+      - name: Configure DoorNet2 Argon LuCI defaults
         run: |
           set -e
 
@@ -591,15 +596,15 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R4 V5.2 UI policy:
-          # Use the standard OpenWrt/LEDE LuCI Bootstrap interface.
+          # DoorNet2 R4 V5.3 UI policy:
+          # Use Argon v2.4.7 as the default LuCI shell.
+          # Keep Bootstrap installed as a safe fallback.
           # QuickStart remains available from the menu but is NOT the homepage.
-          # Remove stale Design/Argon selections from retained upgrades.
 
           uci -q set luci.themes.Bootstrap='/luci-static/bootstrap'
+          uci -q set luci.themes.Argon='/luci-static/argon'
           uci -q delete luci.themes.Design
-          uci -q delete luci.themes.Argon
-          uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
+          uci -q set luci.main.mediaurlbase='/luci-static/argon'
           uci -q set luci.main.lang='zh_cn'
           uci -q commit luci
 
@@ -637,43 +642,46 @@ jobs:
             files/etc/smartdns \
             files/usr/bin
 
-          cat > files/etc/uci-defaults/93-doornet2-ipv4-only <<'EOF'
+          cat > files/etc/uci-defaults/93-doornet2-dualstack-proxyv4 <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R4 validated IPv4-only policy.
-          # Keep IPv6 userspace/kernel compatibility packages installed for
-          # PassWall/firewall3 compatibility, but do not obtain or advertise
-          # IPv6 on WAN/LAN. Existing IPv4 settings are left untouched.
+          # DoorNet2 R4 field-verified split-stack policy:
+          # - Domestic/direct traffic may use native IPv4 + IPv6.
+          # - Domains routed through PassWall proxy keep IPv4 only; their AAAA
+          #   answers are filtered by PassWall (configured in the shunt preset).
+          # - PPPoE uses its integrated IPv6 negotiation and prefix delegation.
 
+          if uci -q get network.wan >/dev/null 2>&1; then
+              uci -q set network.wan.ipv6='auto'
+              uci -q set network.wan.delegate='1'
+          fi
+
+          # Avoid a second standalone DHCPv6 WAN client when the image happens
+          # to contain wan6; PPPoE integrated IPv6 already provides the tested
+          # WAN v6 route and delegated prefix.
           if uci -q get network.wan6 >/dev/null 2>&1; then
               uci -q set network.wan6.auto='0'
               uci -q set network.wan6.disabled='1'
           fi
 
-          uci -q delete network.lan.ip6assign
-          uci -q delete network.lan.ip6hint
-          uci -q delete network.globals.ula_prefix
+          if uci -q get network.lan >/dev/null 2>&1; then
+              [ -n "$(uci -q get network.lan.ip6assign)" ] || \
+                  uci -q set network.lan.ip6assign='64'
+          fi
           uci -q commit network
 
           if uci -q get dhcp.lan >/dev/null 2>&1; then
-              uci -q set dhcp.lan.ra='disabled'
-              uci -q set dhcp.lan.dhcpv6='disabled'
+              uci -q set dhcp.lan.ra='server'
+              uci -q set dhcp.lan.dhcpv6='server'
               uci -q set dhcp.lan.ndp='disabled'
-              uci -q delete dhcp.lan.ra_flags
-              uci -q delete dhcp.lan.dns
               uci -q commit dhcp
-          fi
-
-          if [ -x /etc/init.d/odhcpd ]; then
-              /etc/init.d/odhcpd disable >/dev/null 2>&1 || true
-              /etc/init.d/odhcpd stop >/dev/null 2>&1 || true
           fi
 
           exit 0
           EOF
 
-          chmod 755 files/etc/uci-defaults/93-doornet2-ipv4-only
-          sh -n files/etc/uci-defaults/93-doornet2-ipv4-only
+          chmod 755 files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          sh -n files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
 
           # Explicit persistence policy for retained sysupgrades. Standard UCI
           # files are already preserved by OpenWrt; these entries make the R4
@@ -952,18 +960,17 @@ jobs:
 
           if [ "$CUR_PORT" = "6053" ] && [ -x /etc/init.d/smartdns ]; then
               /etc/init.d/smartdns enable >/dev/null 2>&1 || true
-              /etc/init.d/smartdns restart >/dev/null 2>&1 || true
           fi
 
-          # If AdGuard was retained from an earlier install, bring it back.
-          # The filter helper only
-          # adds anti-AD when missing and never overwrites an existing list.
+          # If AdGuard was retained from an earlier install, keep it enabled,
+          # but do not start it here.  The DNS-chain helper owns the strict
+          # startup order: SmartDNS :6053 first, then AdGuard :3053, then
+          # dnsmasq is pointed at :3053.
           if [ -x /etc/init.d/adguardhome ]; then
               if [ -s /etc/adguardhome.yaml ]; then
                   [ -x /usr/bin/doornet2-adguard-filter-defaults ] && \
                     /usr/bin/doornet2-adguard-filter-defaults >/dev/null 2>&1 || true
                   /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
-                  /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
               fi
           fi
 
@@ -1015,6 +1022,13 @@ jobs:
               echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"
           }
 
+          smartdns_6053_ready()
+          {
+              netstat -lnptu 2>/dev/null \
+                | grep -E '[:.]6053[[:space:]]' \
+                >/dev/null 2>&1
+          }
+
           adguard_3053_ready()
           {
               netstat -lnptu 2>/dev/null \
@@ -1022,19 +1036,32 @@ jobs:
                 >/dev/null 2>&1
           }
 
-          activate_chain()
+          prepare_smartdns()
           {
-              # Keep SmartDNS on the validated local upstream port.
-              if uci -q get smartdns.@smartdns[0] >/dev/null 2>&1; then
-                  uci -q set smartdns.@smartdns[0].enabled='1'
-                  uci -q set smartdns.@smartdns[0].port='6053'
-                  uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
-                  uci -q commit smartdns
-
-                  /etc/init.d/smartdns enable >/dev/null 2>&1 || true
-                  /etc/init.d/smartdns restart >/dev/null 2>&1 || true
+              if ! uci -q get smartdns.@smartdns[0] >/dev/null 2>&1; then
+                  return 1
               fi
 
+              uci -q set smartdns.@smartdns[0].enabled='1'
+              uci -q set smartdns.@smartdns[0].port='6053'
+              uci -q set smartdns.@smartdns[0].auto_set_dnsmasq='0'
+              uci -q commit smartdns
+
+              /etc/init.d/smartdns enable >/dev/null 2>&1 || true
+              /etc/init.d/smartdns restart >/dev/null 2>&1 || true
+
+              i=0
+              while [ "$i" -lt 45 ]; do
+                  smartdns_6053_ready && return 0
+                  sleep 1
+                  i=$((i + 1))
+              done
+
+              return 1
+          }
+
+          activate_chain()
+          {
               # PassWall transparent routing is kept separate from DNS.
               if uci -q get passwall.@global[0] >/dev/null 2>&1; then
                   uci -q set passwall.@global[0].dns_redirect='0'
@@ -1056,6 +1083,17 @@ jobs:
                   : >"$LOG"
                   log_msg "R4 DNS-chain helper started"
 
+                  # Field testing showed AdGuard could start before SmartDNS
+                  # and log connection-refused errors to 127.0.0.1:6053.
+                  # Enforce the validated order and never point dnsmasq at
+                  # AdGuard until both local upstreams are actually listening.
+                  if prepare_smartdns; then
+                      log_msg "SmartDNS :6053 ready"
+                  else
+                      log_msg "SmartDNS :6053 not ready; dnsmasq left unchanged"
+                      exit 0
+                  fi
+
                   if [ -s /etc/adguardhome.yaml ] && [ -x /etc/init.d/adguardhome ]; then
                       /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
                       /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
@@ -1067,6 +1105,7 @@ jobs:
                   i=0
                   while [ "$i" -lt 240 ]; do
                       if adguard_3053_ready; then
+                          log_msg "AdGuard :3053 ready"
                           activate_chain
                           exit 0
                       fi
@@ -1244,6 +1283,15 @@ jobs:
                   esac
               fi
 
+              # Proxy services use IPv4 only while direct/domestic traffic
+              # keeps native dual-stack.  Field-tested on DoorNet2 V5.2.
+              if uci -q get passwall.@global[0] >/dev/null 2>&1; then
+                  uci -q set passwall.@global[0].filter_proxy_ipv6='1'
+              fi
+              if uci -q get passwall.@global_forwarding[0] >/dev/null 2>&1; then
+                  uci -q set passwall.@global_forwarding[0].ipv6_tproxy='0'
+              fi
+
               uci -q commit passwall
               exit 0
           fi
@@ -1390,6 +1438,16 @@ jobs:
           uci -q set passwall.R4Shunt.DN_TencentDirect='_direct'
           uci -q set passwall.R4Shunt.DN_WeChat='_direct'
           uci -q set passwall.R4Shunt.DN_QQ='_direct'
+
+          # Domestic/direct traffic remains native IPv4 + IPv6.  Only domains
+          # actually handled as PassWall proxy targets have AAAA filtered, so
+          # proxy traffic stays IPv4-only and cannot leak/bypass over IPv6.
+          if uci -q get passwall.@global[0] >/dev/null 2>&1; then
+              uci -q set passwall.@global[0].filter_proxy_ipv6='1'
+          fi
+          if uci -q get passwall.@global_forwarding[0] >/dev/null 2>&1; then
+              uci -q set passwall.@global_forwarding[0].ipv6_tproxy='0'
+          fi
 
           # Do not change the user's current global on/off state or TCP node
           # during a retained sysupgrade.
@@ -1676,12 +1734,16 @@ jobs:
           netstat -lntp 2>/dev/null | grep -E ':1080|:1081' || true
 
           echo
-          echo "===== IPv4-ONLY ====="
+          echo "===== DUAL-STACK / PROXY-IPv4 ====="
+          info "wan.ipv6=$(uci -q get network.wan.ipv6)"
+          info "wan.delegate=$(uci -q get network.wan.delegate)"
           info "wan6.auto=$(uci -q get network.wan6.auto)"
           info "wan6.disabled=$(uci -q get network.wan6.disabled)"
           info "lan.ip6assign=$(uci -q get network.lan.ip6assign)"
           info "lan.ra=$(uci -q get dhcp.lan.ra)"
           info "lan.dhcpv6=$(uci -q get dhcp.lan.dhcpv6)"
+          info "filter_proxy_ipv6=$(uci -q get passwall.@global[0].filter_proxy_ipv6)"
+          info "ipv6_tproxy=$(uci -q get passwall.@global_forwarding[0].ipv6_tproxy)"
 
           echo
           echo "===== UU ====="
@@ -1894,20 +1956,23 @@ jobs:
 
 
       # ============================================================
-      # 4. R4 official LuCI UI strategy
+      # 4. R4 Argon LuCI UI strategy
       #
-      # Standard OpenWrt/LEDE Bootstrap shell and normal Status Overview
-      # homepage. QuickStart stays installed only as an optional app.
+      # Argon v2.4.7 shell with Bootstrap retained as fallback.
+      # QuickStart stays installed only as an optional app.
       # ============================================================
 
-      - name: Verify DoorNet2 official LuCI UI policy
+      - name: Verify DoorNet2 Argon LuCI UI policy
         run: |
           set -e
 
-          echo "===== VERIFY OFFICIAL LUCI BOOTSTRAP POLICY ====="
+          echo "===== VERIFY ARGON LUCI POLICY ====="
 
           test -x files/etc/uci-defaults/95-doornet2-ui
           sh -n files/etc/uci-defaults/95-doornet2-ui
+
+          grep -q "luci-static/argon" \
+            files/etc/uci-defaults/95-doornet2-ui
 
           grep -q "luci-static/bootstrap" \
             files/etc/uci-defaults/95-doornet2-ui
@@ -1915,39 +1980,34 @@ jobs:
           grep -q "delete luci.themes.Design" \
             files/etc/uci-defaults/95-doornet2-ui
 
-          grep -q "delete luci.themes.Argon" \
-            files/etc/uci-defaults/95-doornet2-ui
-
-          # Custom theme sources/config must not be shipped in V5.2.
+          test -f package/doornet2/luci-theme-argon/Makefile
           test ! -e package/lean/luci-theme-design
-          test ! -e package/lean/luci-theme-argon
-          test ! -e package/lean/luci-app-argon-config
           test ! -e files/etc/config/design
 
 
       # ============================================================
-      # 4A. R4 time + official LuCI first-boot enforcement
+      # 4A. R4 time + Argon first-boot enforcement
       #
       # No floating CPU/date/time badge is injected. RK3399 thermal
       # support remains untouched, so normal LuCI system information can
       # continue to expose CPU temperature if supported by the base tree.
       # ============================================================
 
-      - name: Add DoorNet2 R4 time and official LuCI first-boot enforcement
+      - name: Add DoorNet2 R4 time and Argon first-boot enforcement
         run: |
           set -e
 
           mkdir -p files/etc/uci-defaults
 
-          cat > files/etc/uci-defaults/99-doornet2-official-ui <<'EOF'
+          cat > files/etc/uci-defaults/99-doornet2-argon-ui <<'EOF'
           #!/bin/sh
 
           # Run late on first boot so retained configs from older DoorNet2
-          # releases cannot force Design/Argon back as the active theme.
+          # releases cannot force Design/Bootstrap back as the active theme.
           uci -q set luci.themes.Bootstrap='/luci-static/bootstrap'
+          uci -q set luci.themes.Argon='/luci-static/argon'
           uci -q delete luci.themes.Design
-          uci -q delete luci.themes.Argon
-          uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
+          uci -q set luci.main.mediaurlbase='/luci-static/argon'
           uci -q commit luci
 
           rm -f /etc/config/design
@@ -1960,8 +2020,8 @@ jobs:
           exit 0
           EOF
 
-          chmod 755 files/etc/uci-defaults/99-doornet2-official-ui
-          sh -n files/etc/uci-defaults/99-doornet2-official-ui
+          chmod 755 files/etc/uci-defaults/99-doornet2-argon-ui
+          sh -n files/etc/uci-defaults/99-doornet2-argon-ui
 
           cat > files/etc/uci-defaults/98-doornet2-time <<'EOF'
           #!/bin/sh
@@ -1999,7 +2059,7 @@ jobs:
 
           echo "===== R4 UI/TIME FILES ====="
           test -x files/etc/uci-defaults/98-doornet2-time
-          test -x files/etc/uci-defaults/99-doornet2-official-ui
+          test -x files/etc/uci-defaults/99-doornet2-argon-ui
 
           if find files -type f -print0 | xargs -0 grep -Il 'runtime-monitor\.js\|runtime-monitor\.css' 2>/dev/null | grep -q .; then
               echo "ERROR: floating runtime monitor references unexpectedly remain in files/."
@@ -2353,7 +2413,7 @@ jobs:
           DOORNET2_MMC_LAYOUT='mmcblk0-tf-mmcblk1-emmc'
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
-          DOORNET2_UI='official-luci-bootstrap-v1'
+          DOORNET2_UI='argon-v2.4.7-with-bootstrap-fallback-v1'
           DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'
           DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-generic-online-v5'
           DOORNET2_SHUNT='preset-rules-tencent-direct-login-safe-v4'
@@ -2361,7 +2421,7 @@ jobs:
           DOORNET2_PASSWALL_DELAY='route-aware-v1'
           DOORNET2_UU_DELAY='route-aware-retry-field-migrate-v2'
           DOORNET2_HEALTH='selfcheck-selfheal-v2'
-          DOORNET2_FINAL_PROFILE='stable-final-v5.2-field-verified'
+          DOORNET2_FINAL_PROFILE='stable-final-v5.3-dualstack-proxyv4-argon'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
           DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
@@ -5287,12 +5347,12 @@ jobs:
           CONFIG_PACKAGE_luci-app-quickstart=y
           CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
 
-          # V5.2 UI:
-          # Standard OpenWrt/LEDE LuCI Bootstrap only.
+          # V5.3 UI:
+          # Argon v2.4.7 is default; Bootstrap stays as fallback.
           # QuickStart is installed above as an optional app, not as homepage.
           CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-theme-argon=y
           # CONFIG_PACKAGE_luci-theme-design is not set
-          # CONFIG_PACKAGE_luci-theme-argon is not set
           # CONFIG_PACKAGE_luci-app-argon-config is not set
 
           CONFIG_PACKAGE_curl=y
@@ -5497,7 +5557,7 @@ jobs:
             files/etc/uci-defaults/96-doornet2-passwall-shunt
 
           echo
-          echo "===== V5.2 OFFICIAL LUCI UI PACKAGES ====="
+          echo "===== V5.3 DUALSTACK + PROXY IPv4 + ARGON PACKAGES ====="
 
           grep -E \
             '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap)=y$' \
@@ -5506,13 +5566,13 @@ jobs:
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-theme-bootstrap=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
 
           ! grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
-          ! grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
           ! grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
 
           test -x files/etc/uci-defaults/95-doornet2-ui
-          grep -q "mediaurlbase='/luci-static/bootstrap'" \
+          grep -q "mediaurlbase='/luci-static/argon'" \
             files/etc/uci-defaults/95-doornet2-ui
           test ! -e files/etc/config/design
 
@@ -5664,22 +5724,22 @@ jobs:
           fi
 
           UI95="$ROOTFS_DIR/etc/uci-defaults/95-doornet2-ui"
-          UI99="$ROOTFS_DIR/etc/uci-defaults/99-doornet2-official-ui"
+          UI99="$ROOTFS_DIR/etc/uci-defaults/99-doornet2-argon-ui"
           test -f "$UI95"
           test -f "$UI99"
-          grep -q "mediaurlbase='/luci-static/bootstrap'" "$UI95"
-          grep -q "mediaurlbase='/luci-static/bootstrap'" "$UI99"
+          grep -q "mediaurlbase='/luci-static/argon'" "$UI95"
+          grep -q "mediaurlbase='/luci-static/argon'" "$UI99"
 
           test -d "$ROOTFS_DIR/www/luci-static/bootstrap"
+          test -d "$ROOTFS_DIR/www/luci-static/argon"
 
           if [ -e "$ROOTFS_DIR/www/luci-static/design" ] || \
-             [ -e "$ROOTFS_DIR/www/luci-static/argon" ] || \
              [ -e "$ROOTFS_DIR/etc/config/design" ]; then
-              echo "ERROR: built rootfs still contains a custom Design/Argon UI"
+              echo "ERROR: built rootfs still contains legacy Design UI"
               exit 1
           fi
 
-          echo "Built rootfs WAN/root-auth/UU/AdGuard/Tencent-direct/official-LuCI safety checks passed"
+          echo "Built rootfs WAN/root-auth/UU/AdGuard/Tencent-direct/Argon safety checks passed"
 
 
       # ============================================================
@@ -5781,7 +5841,7 @@ jobs:
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
             "network_apps": "passwall-smartdns-adguard-persist-uu-generic-online-v5",
-            "ui": "official-luci-bootstrap-v1",
+            "ui": "argon-v2.4.7-with-bootstrap-fallback-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
             "ipv4_only": "wan6-ra-dhcpv6-disabled-v1",
             "uu_runtime": "openwrt-aarch64-console-only-v1",
@@ -5795,7 +5855,7 @@ jobs:
             "passwall_delay": "route-aware-v1",
             "uu_delay": "route-aware-retry-field-migrate-v2",
             "health_check": "selfcheck-selfheal-v2",
-            "profile": "stable-final-v5.2-field-verified",
+            "profile": "stable-final-v5.3-dualstack-proxyv4-argon",
             "release": "R4"
           }
           EOF
@@ -5838,10 +5898,10 @@ jobs:
 
           R4 stable interface:
 
-          - Standard OpenWrt/LEDE LuCI Bootstrap is the default shell
+          - Argon v2.4.7 is the default LuCI shell; Bootstrap is retained as fallback
           - Normal LuCI Status / Overview is the homepage
           - QuickStart remains installed only as an optional application page
-          - Design and Argon custom themes are not included
+          - Legacy Design is not included; Argon is compiled from the official v2.4.7 source
           - No top-right floating CPU/date/time badge is injected
           - CPU temperature remains available in the normal system/CPU status line when supported
           - Timezone/NTP remain configured for Asia/Shanghai
@@ -5857,18 +5917,18 @@ jobs:
           R4 FINAL stability profile:
 
           - LAN management IP remains 192.168.100.1
-          - Official LuCI Bootstrap + normal Status/Overview are the default experience
+          - Argon v2.4.7 + normal Status/Overview are the default experience
           - The old top-right CPU/date/time floating badge stays removed
           - TF-first / eMMC-fallback boot and physical upgrade guards are retained
           - Online firmware updater, PassWall updater and network-app updater are retained
           - PassWall has a route-aware delayed restart guard
           - UU uses the modern `enable` field, is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
           - AdGuard YAML is preserved across sysupgrade; clean installs include a :3053 -> SmartDNS :6053 baseline config
-          - AdGuard/SmartDNS DNS-chain helper waits for real :3053 readiness before touching dnsmasq
+          - DNS-chain helper enforces SmartDNS :6053 readiness before AdGuard :3053, then points dnsmasq at AdGuard
           - WeChat / QQ / Tencent media domains are forced direct at high priority to keep text and photo uploads on one exit
           - /usr/bin/doornet2-health provides a read-only whole-system self-check
           - /usr/bin/doornet2-heal + doornet2-selfheal provide conservative two-strike service recovery
-          - IPv4-only defaults disable wan6 auto-start, LAN RA/DHCPv6/NDP and IPv6 DNS advertisement
+          - Domestic/direct traffic uses native IPv4 + IPv6; PassWall proxy targets filter AAAA and use IPv4 only
           - UU aarch64 runtime is pinned to NetEase openwrt-aarch64 generic mode (console-only discovery)
           - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints
           - High-priority Tencent direct rule covers WeChat, QQ, qpic/gtimg/idqqimg/qlogo and weixinbridge media traffic
@@ -6148,7 +6208,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R4 V5.2 Final build finished"
+          echo "DoorNet2 R4 V5.3 DualStack + ProxyIPv4 + Argon Final build finished"
           echo "========================================"
 
           echo
@@ -6510,18 +6570,18 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== V5.2 FINAL OFFICIAL LUCI + OPTIONAL QUICKSTART ====="
+          echo "===== V5.3 FINAL ARGON + BOOTSTRAP FALLBACK ====="
 
           grep -q \
-            "DOORNET2_UI='official-luci-bootstrap-v1'" \
+            "DOORNET2_UI='argon-v2.4.7-with-bootstrap-fallback-v1'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-theme-bootstrap=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
 
           ! grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
-          ! grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
           ! grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
 
           test -f feeds/nas/network/services/quickstart/Makefile
@@ -6529,24 +6589,23 @@ jobs:
 
           test -x files/etc/uci-defaults/95-doornet2-ui
           sh -n files/etc/uci-defaults/95-doornet2-ui
-          grep -q "mediaurlbase='/luci-static/bootstrap'" \
+          grep -q "mediaurlbase='/luci-static/argon'" \
             files/etc/uci-defaults/95-doornet2-ui
           grep -q "delete luci.themes.Design" \
             files/etc/uci-defaults/95-doornet2-ui
-          grep -q "delete luci.themes.Argon" \
+          grep -q "set luci.themes.Argon='/luci-static/argon'" \
             files/etc/uci-defaults/95-doornet2-ui
 
-          test -x files/etc/uci-defaults/99-doornet2-official-ui
-          sh -n files/etc/uci-defaults/99-doornet2-official-ui
-          grep -q "mediaurlbase='/luci-static/bootstrap'" \
-            files/etc/uci-defaults/99-doornet2-official-ui
+          test -x files/etc/uci-defaults/99-doornet2-argon-ui
+          sh -n files/etc/uci-defaults/99-doornet2-argon-ui
+          grep -q "mediaurlbase='/luci-static/argon'" \
+            files/etc/uci-defaults/99-doornet2-argon-ui
 
+          test -f package/doornet2/luci-theme-argon/Makefile
           test ! -e package/lean/luci-theme-design
-          test ! -e package/lean/luci-theme-argon
-          test ! -e package/lean/luci-app-argon-config
           test ! -e files/etc/config/design
 
-          echo "Official LuCI Bootstrap policy verified (OK)."
+          echo "Argon default + Bootstrap fallback policy verified (OK)."
 
           echo
           echo "===== R4 TIME / CPU TEMP POLICY ====="
@@ -6560,10 +6619,10 @@ jobs:
           grep -q "zonename='Asia/Shanghai'" \
             files/etc/uci-defaults/98-doornet2-time
 
-          test -x files/etc/uci-defaults/99-doornet2-official-ui
-          sh -n files/etc/uci-defaults/99-doornet2-official-ui
-          grep -q "mediaurlbase='/luci-static/bootstrap'" \
-            files/etc/uci-defaults/99-doornet2-official-ui
+          test -x files/etc/uci-defaults/99-doornet2-argon-ui
+          sh -n files/etc/uci-defaults/99-doornet2-argon-ui
+          grep -q "mediaurlbase='/luci-static/argon'" \
+            files/etc/uci-defaults/99-doornet2-argon-ui
 
           # Thermal support is intentionally left to the existing RK3399/
           # LuCI status stack. R4 adds no floating monitor frontend.
@@ -6596,10 +6655,16 @@ jobs:
           grep -q 'uuplugin.@uuplugin\[0\].enable' files/etc/init.d/uu-delay
           grep -q 'delete uuplugin.@uuplugin\[0\].enabled' files/etc/uci-defaults/97-doornet2-network-apps
 
-          test -x files/etc/uci-defaults/93-doornet2-ipv4-only
-          sh -n files/etc/uci-defaults/93-doornet2-ipv4-only
-          grep -q "dhcp.lan.ra='disabled'" files/etc/uci-defaults/93-doornet2-ipv4-only
-          grep -q "dhcp.lan.dhcpv6='disabled'" files/etc/uci-defaults/93-doornet2-ipv4-only
+          test -x files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          sh -n files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          grep -q "network.wan.ipv6='auto'" files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          grep -q "network.wan.delegate='1'" files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          grep -q "dhcp.lan.ra='server'" files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          grep -q "dhcp.lan.dhcpv6='server'" files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
+          grep -q "filter_proxy_ipv6='1'" files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "ipv6_tproxy='0'" files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'SmartDNS :6053 ready' files/etc/init.d/doornet2-dns-chain
+          grep -q 'AdGuard :3053 ready' files/etc/init.d/doornet2-dns-chain
 
           test -s files/etc/sysupgrade.conf
           test -x files/usr/bin/doornet2-adguard-filter-defaults
@@ -6648,5 +6713,5 @@ jobs:
           grep -q 'retained credentials were found'             files/etc/uci-defaults/96-doornet2-wan
           grep -q "DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'"             files/etc/doornet2_release
 
-          echo "R4 FINAL SOLIDIFIED + GENERIC UU + IPv4-ONLY + SELFHEAL + PERSISTENCE SUCCESS"
+          echo "R4 FINAL + GENERIC UU + DOMESTIC DUAL-STACK + PROXY IPv4-ONLY + SELFHEAL + PERSISTENCE SUCCESS"
           echo "========================================"
