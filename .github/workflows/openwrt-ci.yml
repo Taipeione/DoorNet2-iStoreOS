@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v5
+name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v5.1
 
 on:
   workflow_dispatch:
@@ -115,6 +115,34 @@ jobs:
 
       - name: Checkout OpenWrt
         uses: actions/checkout@v4
+
+
+      - name: Remove insecure known default root password
+        shell: bash
+        run: |
+          set -e
+
+          # Upstream LEDE ships a uci-defaults hook that resets root to the
+          # well-known password "password". DoorNet2 must preserve the
+          # user's existing root credential instead.
+          mapfile -t ROOTPW_FILES < <(
+            grep -RIl --fixed-strings 'V4UetPzk' package 2>/dev/null || true
+          )
+
+          if [ "${#ROOTPW_FILES[@]}" -eq 0 ]; then
+              echo "ERROR: expected upstream default-password hook not found"
+              exit 1
+          fi
+
+          for f in "${ROOTPW_FILES[@]}"; do
+              echo "Hardening root-password hook: $f"
+              sed -i '/V4UetPzk/d' "$f"
+          done
+
+          if grep -Rqs --fixed-strings 'V4UetPzk' package 2>/dev/null; then
+              echo "ERROR: known default root-password hash still present"
+              exit 1
+          fi
 
 
       # ============================================================
@@ -439,14 +467,45 @@ jobs:
             's#^aarch64uurl=.*#aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"#' \
             "$UU_INIT"
 
+          # Never fall back to the H3C NX30 Pro binary on aarch64. If the
+          # generic API is temporarily unavailable, uu-delay will retry.
+          python3 - "$UU_INIT" <<'PY'
+          from pathlib import Path
+          import re, sys
+
+          p = Path(sys.argv[1])
+          text = p.read_text()
+
+          text, n = re.subn(
+              r'(?m)^(\s*)UU_url="http://uu\.gdl\.netease\.com/uuplugin/h3c-nx30pro/[^"]*"$',
+              r'\1echo "Generic openwrt-aarch64 lookup failed; refusing H3C fallback"\n\1return 1',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("ERROR: H3C aarch64 fallback line not found exactly once")
+
+          old = 'enabled="$(uci -q get uuplugin.@uuplugin[0].enabled)"'
+          if old not in text:
+              raise SystemExit("ERROR: UU enabled lookup not found")
+          text = text.replace(
+              old,
+              old + '\n\t[ -n "$enabled" ] || enabled="$(uci -q get uuplugin.@uuplugin[0].enable)"',
+              1,
+          )
+          p.write_text(text)
+          PY
+
           grep -q \
             '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' \
             "$UU_INIT"
 
-          if grep -q '^aarch64uurl=.*h3c-nx30pro' "$UU_INIT"; then
-              echo "ERROR: UU aarch64 runtime still points to h3c-nx30pro"
+          if grep -q 'h3c-nx30pro' "$UU_INIT"; then
+              echo "ERROR: UU aarch64 path still contains h3c-nx30pro"
               exit 1
           fi
+
+          grep -q 'uuplugin.@uuplugin\[0\].enable' "$UU_INIT"
 
           echo "===== DOORNET2 UU GENERIC AARCH64 ====="
           grep -n '^aarch64uurl=' "$UU_INIT"
@@ -1828,6 +1887,19 @@ jobs:
               exit 0
           fi
 
+          # Extra retained-upgrade guard: if PPPoE credentials survived but
+          # proto is unexpectedly absent, reconstruct PPPoE instead of DHCP.
+          WAN_USER="$(uci -q get network.wan.username)"
+          WAN_PASS="$(uci -q get network.wan.password)"
+          if [ -n "$WAN_USER" ] || [ -n "$WAN_PASS" ]; then
+              uci -q set network.wan='interface'
+              uci -q set network.wan.proto='pppoe'
+              uci -q commit network
+              logger -t doornet2 \
+                "WAN proto restored to PPPoE because retained credentials were found"
+              exit 0
+          fi
+
           # Clean-install fallback only. Most images already get a WAN section
           # from config_generate/board defaults; create DHCP only when no WAN
           # protocol exists at all.
@@ -2131,13 +2203,15 @@ jobs:
           DOORNET2_PASSWALL_DELAY='route-aware-v1'
           DOORNET2_UU_DELAY='route-aware-retry-v1'
           DOORNET2_HEALTH='selfcheck-selfheal-v2'
-          DOORNET2_FINAL_PROFILE='stable-final-solidified-v2-adblock'
+          DOORNET2_FINAL_PROFILE='stable-final-solidified-v5.1-hardened'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
           DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
           DOORNET2_PERSISTENCE='sysupgrade-explicit-v1'
-          DOORNET2_WAN_POLICY='preserve-existing-proto-v1'
+          DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'
           DOORNET2_SELFHEAL='service-aware-two-strike-v1'
+          DOORNET2_ROOT_AUTH='preserve-user-password-no-known-default-v1'
+          DOORNET2_UU_FALLBACK='generic-only-no-h3c-v1'
           EOF
 
           cat files/etc/doornet2_release
@@ -5379,6 +5453,46 @@ jobs:
             | sort
 
 
+      - name: Verify built rootfs safety invariants
+        shell: bash
+        run: |
+          set -e
+
+          WAN_FILE="$(
+            find build_dir \
+              -type f \
+              -path '*/root-*/etc/uci-defaults/96-doornet2-wan' \
+              -print \
+            | head -n 1
+          )"
+
+          if [ -z "$WAN_FILE" ]; then
+              echo "ERROR: built rootfs WAN policy file not found"
+              exit 1
+          fi
+
+          ROOTFS_DIR="${WAN_FILE%/etc/uci-defaults/96-doornet2-wan}"
+          echo "Built rootfs: $ROOTFS_DIR"
+
+          grep -q 'preserving existing proto=' "$WAN_FILE"
+          grep -q 'retained credentials were found' "$WAN_FILE"
+
+          if grep -Rqs --fixed-strings 'V4UetPzk' "$ROOTFS_DIR/etc" 2>/dev/null; then
+              echo "ERROR: built rootfs still contains known default root-password hash"
+              exit 1
+          fi
+
+          UU_FILE="$ROOTFS_DIR/etc/init.d/uuplugin"
+          test -f "$UU_FILE"
+          grep -q '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' "$UU_FILE"
+          if grep -q 'h3c-nx30pro' "$UU_FILE"; then
+              echo "ERROR: built UU runtime still contains H3C NX30 Pro fallback"
+              exit 1
+          fi
+
+          echo "Built rootfs WAN/root-auth/UU safety checks passed"
+
+
       # ============================================================
       # 17. Prepare artifacts
       # ============================================================
@@ -5483,14 +5597,16 @@ jobs:
             "ipv4_only": "wan6-ra-dhcpv6-disabled-v1",
             "uu_runtime": "openwrt-aarch64-console-only-v1",
             "persistence": "sysupgrade-explicit-v1",
-            "wan_policy": "preserve-existing-proto-v1",
+            "wan_policy": "preserve-existing-proto-and-pppoe-creds-v2",
             "self_heal": "service-aware-two-strike-v1",
+            "root_auth": "preserve-user-password-no-known-default-v1",
+            "uu_fallback": "generic-only-no-h3c-v1",
             "shunt_presets": "preset-rules-forced-direct-v3",
             "dns_chain": "adguard-smartdns-auto-v1",
             "passwall_delay": "route-aware-v1",
             "uu_delay": "route-aware-retry-v1",
             "health_check": "selfcheck-selfheal-v2",
-            "profile": "stable-final-solidified-v2-adblock",
+            "profile": "stable-final-solidified-v5.1-hardened",
             "release": "R4"
           }
           EOF
@@ -5566,6 +5682,9 @@ jobs:
           - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints
           - /etc/sysupgrade.conf explicitly retains network/PassWall/UU/SmartDNS/AdGuard user configuration
           - Existing WAN protocol is preserved across retained sysupgrade; PPPoE is never replaced by the DHCP fallback
+          - If retained PPPoE credentials exist but proto is missing, PPPoE is reconstructed instead of falling back to DHCP
+          - The upstream known root password "password" hook is removed; retained root credentials are never reset by the image
+          - UU generic aarch64 mode never falls back to the H3C NX30 Pro runtime
           - No personal PPPoE credentials, proxy node IDs or AdGuard password are baked into firmware
 
           R4 built-in PassWall shunt presets (v4 login-safe):
@@ -5584,7 +5703,7 @@ jobs:
             Zoom, Notion, Dropbox, PlayStation, Nintendo, Xbox, local media,
             AIGC, Streaming, ProxyGame and DirectGame
           - Personal/imported proxy node IDs are never baked into firmware
-          - Every preset starts as direct; select the desired proxy node in LuCI
+          - Every ordinary preset starts unused; select the desired proxy node in LuCI
           - Existing global PassWall state is preserved during retained upgrades
           - Route-aware delayed PassWall restart improves boot reliability
 
@@ -6386,7 +6505,8 @@ jobs:
           sh -n files/etc/uci-defaults/96-doornet2-wan
           grep -q 'WAN_PROTO="$(uci -q get network.wan.proto)"'             files/etc/uci-defaults/96-doornet2-wan
           grep -q 'preserving existing proto='             files/etc/uci-defaults/96-doornet2-wan
-          grep -q "DOORNET2_WAN_POLICY='preserve-existing-proto-v1'"             files/etc/doornet2_release
+          grep -q 'retained credentials were found'             files/etc/uci-defaults/96-doornet2-wan
+          grep -q "DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'"             files/etc/doornet2_release
 
           echo "R4 FINAL SOLIDIFIED + GENERIC UU + IPv4-ONLY + SELFHEAL + PERSISTENCE SUCCESS"
           echo "========================================"
