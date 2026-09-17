@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v4
+name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v5
 
 on:
   workflow_dispatch:
@@ -1366,7 +1366,7 @@ jobs:
           echo "===== RELEASE ====="
           if [ -r /etc/doornet2_release ]; then
               grep -E \
-                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IPV4_ONLY|UU_RUNTIME|PERSISTENCE|SELFHEAL)=" \
+                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IPV4_ONLY|UU_RUNTIME|PERSISTENCE|WAN_POLICY|SELFHEAL)=" \
                 /etc/doornet2_release 2>/dev/null || true
           else
               warn "/etc/doornet2_release missing"
@@ -1809,7 +1809,7 @@ jobs:
           grep -n "192\.168\.100\.1" "$LAN_CONFIG" || true
 
 
-      - name: Configure default WAN
+      - name: Configure default WAN safely
         run: |
           set -e
 
@@ -1818,15 +1818,39 @@ jobs:
           cat > files/etc/uci-defaults/96-doornet2-wan <<'EOF'
           #!/bin/sh
 
+          # CRITICAL retained-upgrade policy:
+          # Never overwrite an existing WAN protocol. In particular, a retained
+          # PPPoE configuration must stay PPPoE after sysupgrade.
+          WAN_PROTO="$(uci -q get network.wan.proto)"
+
+          if [ -n "$WAN_PROTO" ]; then
+              logger -t doornet2                 "WAN preset skipped; preserving existing proto=$WAN_PROTO"
+              exit 0
+          fi
+
+          # Clean-install fallback only. Most images already get a WAN section
+          # from config_generate/board defaults; create DHCP only when no WAN
+          # protocol exists at all.
+          WAN_IFNAME="$(uci -q get network.wan.ifname)"
+          WAN_DEVICE="$(uci -q get network.wan.device)"
+
           uci -q set network.wan='interface'
-          uci -q set network.wan.device='eth0'
+
+          if [ -z "$WAN_IFNAME" ] && [ -z "$WAN_DEVICE" ]; then
+              # This LEDE/Rockchip tree historically uses eth0 for DoorNet2 WAN.
+              uci -q set network.wan.ifname='eth0'
+          fi
+
           uci -q set network.wan.proto='dhcp'
           uci -q commit network
+
+          logger -t doornet2             "WAN preset created DHCP fallback because no existing proto was found"
 
           exit 0
           EOF
 
           chmod 755 files/etc/uci-defaults/96-doornet2-wan
+          sh -n files/etc/uci-defaults/96-doornet2-wan
 
 
       # ============================================================
@@ -2112,6 +2136,7 @@ jobs:
           DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
           DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
           DOORNET2_PERSISTENCE='sysupgrade-explicit-v1'
+          DOORNET2_WAN_POLICY='preserve-existing-proto-v1'
           DOORNET2_SELFHEAL='service-aware-two-strike-v1'
           EOF
 
@@ -5458,6 +5483,7 @@ jobs:
             "ipv4_only": "wan6-ra-dhcpv6-disabled-v1",
             "uu_runtime": "openwrt-aarch64-console-only-v1",
             "persistence": "sysupgrade-explicit-v1",
+            "wan_policy": "preserve-existing-proto-v1",
             "self_heal": "service-aware-two-strike-v1",
             "shunt_presets": "preset-rules-forced-direct-v3",
             "dns_chain": "adguard-smartdns-auto-v1",
@@ -5539,6 +5565,7 @@ jobs:
           - UU aarch64 runtime is pinned to NetEase openwrt-aarch64 generic mode (console-only discovery)
           - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints
           - /etc/sysupgrade.conf explicitly retains network/PassWall/UU/SmartDNS/AdGuard user configuration
+          - Existing WAN protocol is preserved across retained sysupgrade; PPPoE is never replaced by the DHCP fallback
           - No personal PPPoE credentials, proxy node IDs or AdGuard password are baked into firmware
 
           R4 built-in PassWall shunt presets (v4 login-safe):
@@ -6353,5 +6380,13 @@ jobs:
 
           echo
           echo "========================================"
+          echo
+          echo "===== WAN PRESERVATION POLICY ====="
+          test -x files/etc/uci-defaults/96-doornet2-wan
+          sh -n files/etc/uci-defaults/96-doornet2-wan
+          grep -q 'WAN_PROTO="$(uci -q get network.wan.proto)"'             files/etc/uci-defaults/96-doornet2-wan
+          grep -q 'preserving existing proto='             files/etc/uci-defaults/96-doornet2-wan
+          grep -q "DOORNET2_WAN_POLICY='preserve-existing-proto-v1'"             files/etc/doornet2_release
+
           echo "R4 FINAL SOLIDIFIED + GENERIC UU + IPv4-ONLY + SELFHEAL + PERSISTENCE SUCCESS"
           echo "========================================"
