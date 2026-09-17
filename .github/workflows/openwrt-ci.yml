@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-Final-Solidified-v5.1
+name: DoorNet2-OpenWrt-iStore-R4-V5.2-Final
 
 on:
   workflow_dispatch:
@@ -175,7 +175,7 @@ jobs:
 
 
       # ============================================================
-      # 4. iStore + DoorNet2 iStoreOS-style visual UI
+      # 4. iStore + official OpenWrt LuCI interface
       # ============================================================
 
       - name: Add iStore feed
@@ -490,7 +490,8 @@ jobs:
               raise SystemExit("ERROR: UU enabled lookup not found")
           text = text.replace(
               old,
-              old + '\n\t[ -n "$enabled" ] || enabled="$(uci -q get uuplugin.@uuplugin[0].enable)"',
+              'enabled="$(uci -q get uuplugin.@uuplugin[0].enable)"'
+              + '\n\t[ -n "$enabled" ] || enabled="$(uci -q get uuplugin.@uuplugin[0].enabled)"',
               1,
           )
           p.write_text(text)
@@ -529,11 +530,11 @@ jobs:
           test ! -e package/feeds/luci/luci-app-uugamebooster
 
 
-      - name: Add QuickStart and DoorNet2 UI themes
+      - name: Add QuickStart as optional app and use official LuCI Bootstrap
         run: |
           set -e
 
-          echo "===== ADD QUICKSTART FEEDS ====="
+          echo "===== ADD QUICKSTART FEEDS (OPTIONAL APP ONLY) ====="
 
           grep -q '^src-git nas ' feeds.conf.default || \
             echo 'src-git nas https://github.com/linkease/nas-packages.git;master' \
@@ -555,44 +556,10 @@ jobs:
             -p nas_luci \
             luci-app-quickstart
 
-          echo "===== ADD DESIGN THEME (DEFAULT) ====="
-
-          mkdir -p package/lean
-
-          rm -rf \
-            package/lean/luci-theme-design \
-            package/lean/luci-theme-argon \
-            package/lean/luci-app-argon-config
-
-          # Design main is the Lua/LEDE branch and matches this DoorNet2 tree.
-          git clone \
-            --depth 1 \
-            --branch main \
-            https://github.com/0x676e67/luci-theme-design.git \
-            package/lean/luci-theme-design
-
-          # Keep Argon as a recovery/fallback theme only.
-          git clone \
-            --depth 1 \
-            https://github.com/jerrykuku/luci-theme-argon.git \
-            package/lean/luci-theme-argon
-
-          git clone \
-            --depth 1 \
-            https://github.com/jerrykuku/luci-app-argon-config.git \
-            package/lean/luci-app-argon-config
-
-          echo "===== VERIFY QUICKSTART / DESIGN / RECOVERY THEMES ====="
+          echo "===== VERIFY QUICKSTART OPTIONAL APP ====="
 
           test -f feeds/nas/network/services/quickstart/Makefile
           test -f feeds/nas_luci/luci/luci-app-quickstart/Makefile
-
-          test -f package/lean/luci-theme-design/Makefile
-          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-          test -f package/lean/luci-theme-design/htdocs/luci-static/design/css/style.css
-
-          test -f package/lean/luci-theme-argon/Makefile
-          test -f package/lean/luci-app-argon-config/Makefile
 
           grep -nE \
             'PKG_NAME:=quickstart|PKG_VERSION|DEPENDS' \
@@ -603,36 +570,42 @@ jobs:
             'LUCI_TITLE|LUCI_DEPENDS|PKG_VERSION' \
             feeds/nas_luci/luci/luci-app-quickstart/Makefile
 
-          echo "===== PATCH DESIGN HOME SHORTCUT TO QUICKSTART ====="
+          echo "QuickStart stays installed as an optional application only."
 
-          DESIGN_HEADER="package/lean/luci-theme-design/luasrc/view/themes/design/header.htm"
+          # Remove custom-theme sources if the base tree happens to carry them.
+          # V5.2 intentionally ships only the standard LuCI Bootstrap shell.
+          rm -rf \
+            package/lean/luci-theme-design \
+            package/lean/luci-theme-argon \
+            package/lean/luci-app-argon-config
 
-          sed -i \
-            's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
-            "$DESIGN_HEADER"
-
-          grep -n '/cgi-bin/luci/admin/quickstart/' "$DESIGN_HEADER"
+          echo "No Design/Argon theme sources are included; LuCI Bootstrap is the shell."
 
 
-      - name: Configure DoorNet2 UI defaults
+      - name: Configure DoorNet2 official LuCI defaults
         run: |
           set -e
 
-          mkdir -p \
-            files/etc/uci-defaults \
-            files/etc/config
+          mkdir -p files/etc/uci-defaults
 
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R4 UI policy:
-          # Design default + QuickStart home, with Argon/Bootstrap recovery.
+          # DoorNet2 R4 V5.2 UI policy:
+          # Use the standard OpenWrt/LEDE LuCI Bootstrap interface.
+          # QuickStart remains available from the menu but is NOT the homepage.
+          # Remove stale Design/Argon selections from retained upgrades.
 
-          uci -q set luci.themes.Design='/luci-static/design'
-          uci -q set luci.themes.Argon='/luci-static/argon'
-          uci -q set luci.main.mediaurlbase='/luci-static/design'
+          uci -q set luci.themes.Bootstrap='/luci-static/bootstrap'
+          uci -q delete luci.themes.Design
+          uci -q delete luci.themes.Argon
+          uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
           uci -q set luci.main.lang='zh_cn'
           uci -q commit luci
+
+          # Remove stale custom-theme configuration if upgrading from an older
+          # DoorNet2 build that used luci-theme-design.
+          rm -f /etc/config/design
 
           if [ "$(uci -q get system.@system[0].hostname)" = "OpenWrt" ]; then
               uci -q set system.@system[0].hostname='DoorNet2'
@@ -650,16 +623,8 @@ jobs:
           chmod 755 files/etc/uci-defaults/95-doornet2-ui
           sh -n files/etc/uci-defaults/95-doornet2-ui
 
-          cat > files/etc/config/design <<'EOF'
-          config global
-                  option mode 'dark'
-                  option navbar 'display'
-                  option navbar_proxy 'passwall'
-          EOF
-
-          echo "===== R4 UI DEFAULTS ====="
+          echo "===== OFFICIAL LUCI UI DEFAULTS ====="
           cat files/etc/uci-defaults/95-doornet2-ui
-          cat files/etc/config/design
 
 
       - name: Configure DoorNet2 R4 DNS and accelerator defaults
@@ -720,7 +685,6 @@ jobs:
           /etc/config/system
           /etc/config/dropbear
           /etc/config/luci
-          /etc/config/design
           /etc/config/passwall
           /etc/config/uuplugin
           /etc/config/smartdns
@@ -729,8 +693,149 @@ jobs:
           /etc/smartdns/
           EOF
 
+          # Clean-install AdGuard Home baseline.  On retained sysupgrade the
+          # preserved /etc/adguardhome.yaml from sysupgrade.conf overrides this
+          # file, so user accounts, filters and custom rules remain untouched.
+          # The default DNS chain is dnsmasq:53 -> AdGuard:3053 -> SmartDNS:6053.
+          cat > files/etc/adguardhome.yaml <<'EOF'
+          http:
+            pprof:
+              port: 6060
+              enabled: false
+            address: 0.0.0.0:3000
+            session_ttl: 720h
+          users: []
+          auth_attempts: 5
+          block_auth_min: 15
+          http_proxy: ""
+          language: zh-cn
+          theme: auto
+          dns:
+            bind_hosts:
+              - 0.0.0.0
+              - '::'
+            port: 3053
+            anonymize_client_ip: false
+            ratelimit: 20
+            ratelimit_subnet_len_ipv4: 24
+            ratelimit_subnet_len_ipv6: 56
+            refuse_any: true
+            upstream_dns:
+              - 127.0.0.1:6053
+            upstream_dns_file: ""
+            bootstrap_dns:
+              - 223.5.5.5
+              - 119.29.29.29
+            fallback_dns: []
+            upstream_mode: load_balance
+            fastest_timeout: 1s
+            allowed_clients: []
+            disallowed_clients: []
+            blocked_hosts:
+              - version.bind
+              - id.server
+              - hostname.bind
+            trusted_proxies:
+              - 127.0.0.0/8
+              - ::1/128
+            cache_size: 4194304
+            cache_ttl_min: 0
+            cache_ttl_max: 0
+            cache_optimistic: false
+            bogus_nxdomain: []
+            aaaa_disabled: true
+            enable_dnssec: false
+            edns_client_subnet:
+              custom_ip: ""
+              enabled: false
+              use_custom: false
+            max_goroutines: 300
+            handle_ddr: true
+            ipset: []
+            ipset_file: ""
+            bootstrap_prefer_ipv6: false
+            local_ptr_upstreams: []
+            use_private_ptr_resolvers: true
+            use_dns64: false
+            dns64_prefixes: []
+            serve_http3: false
+            use_http3_upstreams: false
+            serve_plain_dns: true
+            hostsfile_enabled: true
+          tls:
+            enabled: false
+            server_name: ""
+            force_https: false
+            port_https: 443
+            port_dns_over_tls: 853
+            port_dns_over_quic: 853
+            port_dnscrypt: 0
+            dnscrypt_config_file: ""
+            allow_unencrypted_doh: false
+            certificate_chain: ""
+            private_key: ""
+            certificate_path: ""
+            private_key_path: ""
+            strict_sni_check: false
+          querylog:
+            ignored: []
+            interval: 2160h
+            size_memory: 1000
+            enabled: true
+            file_enabled: true
+          statistics:
+            ignored: []
+            interval: 24h
+          filters:
+            - enabled: true
+              url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+              name: AdGuard DNS filter
+              id: 1
+            - enabled: false
+              url: https://anti-ad.net/easylist.txt
+              name: anti-AD
+              id: 900001
+          whitelist_filters: []
+          user_rules: []
+          filtering:
+            blocking_ipv4: ""
+            blocking_ipv6: ""
+            protection_enabled: true
+            filtering_enabled: true
+            filters_update_interval: 24
+            parental_enabled: false
+            safesearch_enabled: false
+            safebrowsing_enabled: false
+            rewrites: []
+          dhcp:
+            enabled: false
+            interface_name: ""
+            local_domain_name: lan
+          clients:
+            runtime_sources:
+              whois: true
+              arp: true
+              rdns: true
+              dhcp: true
+              hosts: true
+            persistent: []
+          log:
+            file: ""
+            max_backups: 0
+            max_size: 100
+            max_age: 3
+            compress: false
+            localtime: false
+            verbose: false
+          os:
+            group: ""
+            user: ""
+            rlimit_nofile: 0
+          schema_version: 29
+          EOF
+
           # AdGuard filter defaults are applied non-destructively after the
-          # user's normal first-run setup creates /etc/adguardhome.yaml.
+          # clean installs ship /etc/adguardhome.yaml and retained upgrades preserve it.
           # Existing user filter choices are preserved; anti-AD is preloaded
           # when it is missing but remains disabled by default. AdGuard Home's clean-install defaults keep
           # AdGuard DNS filter enabled and AdAway disabled.
@@ -809,9 +914,10 @@ jobs:
           # Clean-install safety:
           # - SmartDNS is prepared on :6053.
           # - SmartDNS never auto-rewrites dnsmasq.
-          # - AdGuard keeps its normal first-run setup / user password flow.
-          # - dnsmasq remains untouched until AdGuard is actually listening
-          #   on :3053, so a clean flash never loses DNS.
+          # - A baseline AdGuard config is shipped on :3053 with SmartDNS :6053
+          #   as upstream; retained upgrades preserve the user's existing YAML.
+          # - dnsmasq is only switched after AdGuard is actually listening on
+          #   :3053, so even an invalid/edited YAML cannot take DNS offline.
 
           CUR_ENABLED="$(uci -q get smartdns.@smartdns[0].enabled)"
           CUR_PORT="$(uci -q get smartdns.@smartdns[0].port)"
@@ -850,7 +956,7 @@ jobs:
           fi
 
           # If AdGuard was retained from an earlier install, bring it back.
-          # Otherwise leave first-run setup untouched.  The filter helper only
+          # The filter helper only
           # adds anti-AD when missing and never overwrites an existing list.
           if [ -x /etc/init.d/adguardhome ]; then
               if [ -s /etc/adguardhome.yaml ]; then
@@ -858,13 +964,32 @@ jobs:
                     /usr/bin/doornet2-adguard-filter-defaults >/dev/null 2>&1 || true
                   /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
                   /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
-              else
-                  /etc/init.d/adguardhome disable >/dev/null 2>&1 || true
-                  /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
               fi
           fi
 
-          # UU remains user-controlled. Do not change an existing setting.
+          # Normalize the UU enable field.  V5.1 field testing proved that a
+          # stale legacy `enabled=0` can override a valid `enable=1` in some
+          # plugin revisions.  DoorNet2 uses the modern `enable` field only.
+          if uci -q get uuplugin.@uuplugin[0] >/dev/null 2>&1; then
+              UU_ENABLE="$(uci -q get uuplugin.@uuplugin[0].enable)"
+              UU_ENABLED_OLD="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+
+              if [ -z "$UU_ENABLE" ]; then
+                  if [ -n "$UU_ENABLED_OLD" ]; then
+                      uci -q set uuplugin.@uuplugin[0].enable="$UU_ENABLED_OLD"
+                  else
+                      uci -q set uuplugin.@uuplugin[0].enable='1'
+                  fi
+              fi
+
+              # This DoorNet2 profile ships UU as an enabled console service.
+              # Retained V5.1 installs already use enable=1; clean package
+              # defaults are promoted to the verified running state here.
+              uci -q set uuplugin.@uuplugin[0].enable='1'
+              uci -q delete uuplugin.@uuplugin[0].enabled
+              uci -q commit uuplugin
+              /etc/init.d/uuplugin enable >/dev/null 2>&1 || true
+          fi
 
           if [ -x /etc/init.d/doornet2-dns-chain ]; then
               /etc/init.d/doornet2-dns-chain enable >/dev/null 2>&1 || true
@@ -1025,6 +1150,26 @@ jobs:
           domain:router.uu.163.com
           domain:uu.gdl.netease.com"
 
+          # High-priority mainland Tencent/WeChat media path.  V5.1
+          # field testing showed that text messages could work while photo
+          # uploads failed when WeChat and Tencent CDN domains used different
+          # exits.  Keep the whole family on one direct mainland path.
+          uci -q delete passwall.DN_TencentDirect
+          uci -q set passwall.DN_TencentDirect='shunt_rules'
+          uci -q set passwall.DN_TencentDirect.remarks='微信 / QQ / 腾讯媒体强制直连'
+          uci -q set passwall.DN_TencentDirect.network='tcp,udp'
+          uci -q set "passwall.DN_TencentDirect.domain_list=domain:wechat.com
+          domain:weixin.qq.com
+          domain:wx.qq.com
+          domain:wechatapp.com
+          domain:qpic.cn
+          domain:qq.com
+          domain:qzone.qq.com
+          domain:gtimg.com
+          domain:idqqimg.com
+          domain:qlogo.cn
+          domain:weixinbridge.com"
+
           # High-priority ChatGPT login path. OpenAI's login flow also uses
           # WorkOS, Cloudflare challenge, Stripe/Intercom telemetry endpoints
           # and one Apple endpoint. Keep the whole login transaction on the
@@ -1060,7 +1205,8 @@ jobs:
 
           # Keep system-owned safety/login rules ahead of broad service rules.
           uci -q reorder passwall.DN_ForcedDirect=0 >/dev/null 2>&1 || true
-          uci -q reorder passwall.DN_ChatGPT_Login=1 >/dev/null 2>&1 || true
+          uci -q reorder passwall.DN_TencentDirect=1 >/dev/null 2>&1 || true
+          uci -q reorder passwall.DN_ChatGPT_Login=2 >/dev/null 2>&1 || true
 
           # Broad umbrella rows stay visible but must not overlap the dedicated
           # per-service rules. Clear only the stock DoorNet2 definitions.
@@ -1082,6 +1228,9 @@ jobs:
           # node for the ChatGPT login path. Leave all other dropdowns untouched.
           if [ "$(uci -q get passwall.R4Shunt.remarks)" = "R4 分流总节点" ]; then
               uci -q set passwall.R4Shunt.DN_ForcedDirect='_direct'
+              uci -q set passwall.R4Shunt.DN_TencentDirect='_direct'
+              uci -q set passwall.R4Shunt.DN_WeChat='_direct'
+              uci -q set passwall.R4Shunt.DN_QQ='_direct'
 
               if [ -z "$(uci -q get passwall.R4Shunt.DN_ChatGPT_Login)" ]; then
                   OPENAI_NODE="$(uci -q get passwall.R4Shunt.DN_OpenAI)"
@@ -1132,9 +1281,9 @@ jobs:
 
           # Mainland communication
           add_rule DN_WeChat "WeChat / 微信" \
-            "wechat.com,weixin.qq.com,wx.qq.com,wechatapp.com,qpic.cn" ""
+            "wechat.com,weixin.qq.com,wx.qq.com,wechatapp.com,qpic.cn,weixinbridge.com" ""
           add_rule DN_QQ "QQ / 腾讯" \
-            "qq.com,qzone.qq.com,gtimg.com,idqqimg.com" ""
+            "qq.com,qzone.qq.com,gtimg.com,idqqimg.com,qlogo.cn" ""
 
           # Overseas communication
           add_rule DN_LINE "LINE" \
@@ -1238,6 +1387,9 @@ jobs:
           # Ordinary service rules intentionally have no R4Shunt mapping here,
           # which LuCI presents as unused/not selected on first boot.
           uci -q set passwall.R4Shunt.DN_ForcedDirect='_direct'
+          uci -q set passwall.R4Shunt.DN_TencentDirect='_direct'
+          uci -q set passwall.R4Shunt.DN_WeChat='_direct'
+          uci -q set passwall.R4Shunt.DN_QQ='_direct'
 
           # Do not change the user's current global on/off state or TCP node
           # during a retained sysupgrade.
@@ -1339,6 +1491,12 @@ jobs:
 
                   ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
                   [ -n "$ENABLED" ] || ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+
+                  if [ -n "$ENABLED" ]; then
+                      uci -q set uuplugin.@uuplugin[0].enable="$ENABLED"
+                      uci -q delete uuplugin.@uuplugin[0].enabled
+                      uci -q commit uuplugin
+                  fi
                   if [ "$ENABLED" != "1" ]; then
                       echo "$(date '+%Y-%m-%d %H:%M:%S') UU disabled; no restart needed" >>"$LOG"
                       exit 0
@@ -1491,7 +1649,7 @@ jobs:
           if netstat -lnptu 2>/dev/null | grep -q ':3053 '; then
               ok "AdGuard DNS :3053 listening"
           else
-              info "AdGuard DNS :3053 not listening (normal before first-run setup)"
+              warn "AdGuard DNS :3053 not listening"
           fi
 
           if command -v nslookup >/dev/null 2>&1; then
@@ -1736,63 +1894,63 @@ jobs:
 
 
       # ============================================================
-      # 4. R4 UI strategy
+      # 4. R4 official LuCI UI strategy
       #
-      # Use the native Design theme for the whole shell.
-      # No global Argon "fake iStoreOS" stylesheet is injected.
+      # Standard OpenWrt/LEDE Bootstrap shell and normal Status Overview
+      # homepage. QuickStart stays installed only as an optional app.
       # ============================================================
 
-      - name: Verify DoorNet2 Design UI source
+      - name: Verify DoorNet2 official LuCI UI policy
         run: |
           set -e
 
-          echo "===== VERIFY R4 DESIGN UI SOURCE ====="
-
-          test -f package/lean/luci-theme-design/Makefile
-          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-          test -f package/lean/luci-theme-design/htdocs/luci-static/design/css/style.css
-
-          grep -q \
-            '/cgi-bin/luci/admin/quickstart/' \
-            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-
-          test -f files/etc/config/design
-          grep -q "option mode 'dark'" files/etc/config/design
-          grep -q "option navbar_proxy 'passwall'" files/etc/config/design
+          echo "===== VERIFY OFFICIAL LUCI BOOTSTRAP POLICY ====="
 
           test -x files/etc/uci-defaults/95-doornet2-ui
-          grep -q "mediaurlbase='/luci-static/design'" \
+          sh -n files/etc/uci-defaults/95-doornet2-ui
+
+          grep -q "luci-static/bootstrap" \
             files/etc/uci-defaults/95-doornet2-ui
 
+          grep -q "delete luci.themes.Design" \
+            files/etc/uci-defaults/95-doornet2-ui
+
+          grep -q "delete luci.themes.Argon" \
+            files/etc/uci-defaults/95-doornet2-ui
+
+          # Custom theme sources/config must not be shipped in V5.2.
+          test ! -e package/lean/luci-theme-design
+          test ! -e package/lean/luci-theme-argon
+          test ! -e package/lean/luci-app-argon-config
+          test ! -e files/etc/config/design
+
 
       # ============================================================
-      # 4A. R4 time + Design first-boot fix
+      # 4A. R4 time + official LuCI first-boot enforcement
       #
-      # R4 intentionally removes the floating CPU/date/time badge.
-      # RK3399 thermal support remains untouched, so the normal LuCI
-      # system/CPU information line can continue to display temperature.
-      # Timezone/NTP also remain configured.
+      # No floating CPU/date/time badge is injected. RK3399 thermal
+      # support remains untouched, so normal LuCI system information can
+      # continue to expose CPU temperature if supported by the base tree.
       # ============================================================
 
-      - name: Add DoorNet2 R4 time and Design first-boot fix
+      - name: Add DoorNet2 R4 time and official LuCI first-boot enforcement
         run: |
           set -e
 
           mkdir -p files/etc/uci-defaults
 
-          # The Design package can install a fresh runtime header after source
-          # patching. Keep only the QuickStart-home patch; do not inject any
-          # floating runtime-monitor CSS/JS.
-          cat > files/etc/uci-defaults/99-doornet2-design-header-fix <<'EOF'
+          cat > files/etc/uci-defaults/99-doornet2-official-ui <<'EOF'
           #!/bin/sh
 
-          DESIGN_HDR="/usr/lib/lua/luci/view/themes/design/header.htm"
+          # Run late on first boot so retained configs from older DoorNet2
+          # releases cannot force Design/Argon back as the active theme.
+          uci -q set luci.themes.Bootstrap='/luci-static/bootstrap'
+          uci -q delete luci.themes.Design
+          uci -q delete luci.themes.Argon
+          uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
+          uci -q commit luci
 
-          if [ -f "$DESIGN_HDR" ]; then
-              sed -i \
-                's#/cgi-bin/luci/admin/status/overview#/cgi-bin/luci/admin/quickstart/#g' \
-                "$DESIGN_HDR"
-          fi
+          rm -f /etc/config/design
 
           rm -rf \
             /tmp/luci-indexcache \
@@ -1802,8 +1960,8 @@ jobs:
           exit 0
           EOF
 
-          chmod 755 files/etc/uci-defaults/99-doornet2-design-header-fix
-          sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
+          chmod 755 files/etc/uci-defaults/99-doornet2-official-ui
+          sh -n files/etc/uci-defaults/99-doornet2-official-ui
 
           cat > files/etc/uci-defaults/98-doornet2-time <<'EOF'
           #!/bin/sh
@@ -1841,7 +1999,7 @@ jobs:
 
           echo "===== R4 UI/TIME FILES ====="
           test -x files/etc/uci-defaults/98-doornet2-time
-          test -x files/etc/uci-defaults/99-doornet2-design-header-fix
+          test -x files/etc/uci-defaults/99-doornet2-official-ui
 
           if find files -type f -print0 | xargs -0 grep -Il 'runtime-monitor\.js\|runtime-monitor\.css' 2>/dev/null | grep -q .; then
               echo "ERROR: floating runtime monitor references unexpectedly remain in files/."
@@ -2195,19 +2353,19 @@ jobs:
           DOORNET2_MMC_LAYOUT='mmcblk0-tf-mmcblk1-emmc'
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
-          DOORNET2_UI='quickstart-design-dark-v1'
+          DOORNET2_UI='official-luci-bootstrap-v1'
           DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'
-          DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-generic-online-v4'
-          DOORNET2_SHUNT='preset-rules-forced-direct-v3'
-          DOORNET2_DNS_CHAIN='adguard-smartdns-auto-v1'
+          DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-generic-online-v5'
+          DOORNET2_SHUNT='preset-rules-tencent-direct-login-safe-v4'
+          DOORNET2_DNS_CHAIN='adguard-smartdns-persistent-auto-v2'
           DOORNET2_PASSWALL_DELAY='route-aware-v1'
-          DOORNET2_UU_DELAY='route-aware-retry-v1'
+          DOORNET2_UU_DELAY='route-aware-retry-field-migrate-v2'
           DOORNET2_HEALTH='selfcheck-selfheal-v2'
-          DOORNET2_FINAL_PROFILE='stable-final-solidified-v5.1-hardened'
+          DOORNET2_FINAL_PROFILE='stable-final-v5.2-field-verified'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
           DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
-          DOORNET2_PERSISTENCE='sysupgrade-explicit-v1'
+          DOORNET2_PERSISTENCE='sysupgrade-explicit-adguard-v2'
           DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'
           DOORNET2_SELFHEAL='service-aware-two-strike-v1'
           DOORNET2_ROOT_AUTH='preserve-user-password-no-known-default-v1'
@@ -5129,12 +5287,13 @@ jobs:
           CONFIG_PACKAGE_luci-app-quickstart=y
           CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
 
-          # R33 UI:
-          # Design is default. Argon and Bootstrap remain as recovery themes.
+          # V5.2 UI:
+          # Standard OpenWrt/LEDE LuCI Bootstrap only.
+          # QuickStart is installed above as an optional app, not as homepage.
           CONFIG_PACKAGE_luci-theme-bootstrap=y
-          CONFIG_PACKAGE_luci-theme-design=y
-          CONFIG_PACKAGE_luci-theme-argon=y
-          CONFIG_PACKAGE_luci-app-argon-config=y
+          # CONFIG_PACKAGE_luci-theme-design is not set
+          # CONFIG_PACKAGE_luci-theme-argon is not set
+          # CONFIG_PACKAGE_luci-app-argon-config is not set
 
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_ca-bundle=y
@@ -5338,25 +5497,24 @@ jobs:
             files/etc/uci-defaults/96-doornet2-passwall-shunt
 
           echo
-          echo "===== R34 UI PACKAGES ====="
+          echo "===== V5.2 OFFICIAL LUCI UI PACKAGES ====="
 
           grep -E \
-            '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap|luci-theme-design|luci-theme-argon|luci-app-argon-config)=y$' \
+            '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap)=y$' \
             .config || true
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-bootstrap=y$' .config
 
-          test -f package/lean/luci-theme-design/Makefile
-          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
+          ! grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
+          ! grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
+          ! grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
+
           test -x files/etc/uci-defaults/95-doornet2-ui
-          test -f files/etc/config/design
-          grep -q "mediaurlbase='/luci-static/design'" \
+          grep -q "mediaurlbase='/luci-static/bootstrap'" \
             files/etc/uci-defaults/95-doornet2-ui
-          grep -q "option mode 'dark'" files/etc/config/design
+          test ! -e files/etc/config/design
 
 
       # ============================================================
@@ -5485,12 +5643,43 @@ jobs:
           UU_FILE="$ROOTFS_DIR/etc/init.d/uuplugin"
           test -f "$UU_FILE"
           grep -q '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' "$UU_FILE"
+          grep -q 'uuplugin.@uuplugin\[0\].enable' "$UU_FILE"
+
+          test -s "$ROOTFS_DIR/etc/adguardhome.yaml"
+          grep -q 'port: 3053' "$ROOTFS_DIR/etc/adguardhome.yaml"
+          grep -q '127.0.0.1:6053' "$ROOTFS_DIR/etc/adguardhome.yaml"
+          grep -q 'name: AdGuard DNS filter' "$ROOTFS_DIR/etc/adguardhome.yaml"
+          grep -q 'name: anti-AD' "$ROOTFS_DIR/etc/adguardhome.yaml"
+
+          SHUNT_FILE="$ROOTFS_DIR/etc/uci-defaults/96-doornet2-passwall-shunt"
+          test -f "$SHUNT_FILE"
+          grep -q 'DN_TencentDirect' "$SHUNT_FILE"
+          grep -q 'domain:qpic.cn' "$SHUNT_FILE"
+          grep -q 'domain:gtimg.com' "$SHUNT_FILE"
+          grep -q 'domain:qlogo.cn' "$SHUNT_FILE"
+          grep -q "R4Shunt.DN_TencentDirect='_direct'" "$SHUNT_FILE"
           if grep -q 'h3c-nx30pro' "$UU_FILE"; then
               echo "ERROR: built UU runtime still contains H3C NX30 Pro fallback"
               exit 1
           fi
 
-          echo "Built rootfs WAN/root-auth/UU safety checks passed"
+          UI95="$ROOTFS_DIR/etc/uci-defaults/95-doornet2-ui"
+          UI99="$ROOTFS_DIR/etc/uci-defaults/99-doornet2-official-ui"
+          test -f "$UI95"
+          test -f "$UI99"
+          grep -q "mediaurlbase='/luci-static/bootstrap'" "$UI95"
+          grep -q "mediaurlbase='/luci-static/bootstrap'" "$UI99"
+
+          test -d "$ROOTFS_DIR/www/luci-static/bootstrap"
+
+          if [ -e "$ROOTFS_DIR/www/luci-static/design" ] || \
+             [ -e "$ROOTFS_DIR/www/luci-static/argon" ] || \
+             [ -e "$ROOTFS_DIR/etc/config/design" ]; then
+              echo "ERROR: built rootfs still contains a custom Design/Argon UI"
+              exit 1
+          fi
+
+          echo "Built rootfs WAN/root-auth/UU/AdGuard/Tencent-direct/official-LuCI safety checks passed"
 
 
       # ============================================================
@@ -5591,22 +5780,22 @@ jobs:
             "extroot": false,
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
-            "network_apps": "passwall-smartdns-adguard-chain-uu-generic-online-v4",
-            "ui": "quickstart-design-dark-v1",
+            "network_apps": "passwall-smartdns-adguard-persist-uu-generic-online-v5",
+            "ui": "official-luci-bootstrap-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
             "ipv4_only": "wan6-ra-dhcpv6-disabled-v1",
             "uu_runtime": "openwrt-aarch64-console-only-v1",
-            "persistence": "sysupgrade-explicit-v1",
+            "persistence": "sysupgrade-explicit-adguard-v2",
             "wan_policy": "preserve-existing-proto-and-pppoe-creds-v2",
             "self_heal": "service-aware-two-strike-v1",
             "root_auth": "preserve-user-password-no-known-default-v1",
             "uu_fallback": "generic-only-no-h3c-v1",
-            "shunt_presets": "preset-rules-forced-direct-v3",
-            "dns_chain": "adguard-smartdns-auto-v1",
+            "shunt_presets": "preset-rules-tencent-direct-login-safe-v4",
+            "dns_chain": "adguard-smartdns-persistent-auto-v2",
             "passwall_delay": "route-aware-v1",
-            "uu_delay": "route-aware-retry-v1",
+            "uu_delay": "route-aware-retry-field-migrate-v2",
             "health_check": "selfcheck-selfheal-v2",
-            "profile": "stable-final-solidified-v5.1-hardened",
+            "profile": "stable-final-v5.2-field-verified",
             "release": "R4"
           }
           EOF
@@ -5649,12 +5838,12 @@ jobs:
 
           R4 stable interface:
 
-          - Design theme is the default LuCI shell
-          - QuickStart remains the iStoreOS-style home/workflow page
-          - Design dark mode is enabled by default
-          - Argon and Bootstrap remain installed as recovery themes
-          - The top-right floating CPU/date/time badge is removed
-          - CPU temperature remains available in the normal system/CPU status line
+          - Standard OpenWrt/LEDE LuCI Bootstrap is the default shell
+          - Normal LuCI Status / Overview is the homepage
+          - QuickStart remains installed only as an optional application page
+          - Design and Argon custom themes are not included
+          - No top-right floating CPU/date/time badge is injected
+          - CPU temperature remains available in the normal system/CPU status line when supported
           - Timezone/NTP remain configured for Asia/Shanghai
 
           R4 PassWall compatibility:
@@ -5668,18 +5857,21 @@ jobs:
           R4 FINAL stability profile:
 
           - LAN management IP remains 192.168.100.1
-          - Design dark UI + QuickStart remain the default experience
+          - Official LuCI Bootstrap + normal Status/Overview are the default experience
           - The old top-right CPU/date/time floating badge stays removed
           - TF-first / eMMC-fallback boot and physical upgrade guards are retained
           - Online firmware updater, PassWall updater and network-app updater are retained
           - PassWall has a route-aware delayed restart guard
-          - UU has a route-aware 3-attempt restart guard when UU is enabled
-          - AdGuard/SmartDNS DNS-chain helper waits for real :3053 readiness
+          - UU uses the modern `enable` field, is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
+          - AdGuard YAML is preserved across sysupgrade; clean installs include a :3053 -> SmartDNS :6053 baseline config
+          - AdGuard/SmartDNS DNS-chain helper waits for real :3053 readiness before touching dnsmasq
+          - WeChat / QQ / Tencent media domains are forced direct at high priority to keep text and photo uploads on one exit
           - /usr/bin/doornet2-health provides a read-only whole-system self-check
           - /usr/bin/doornet2-heal + doornet2-selfheal provide conservative two-strike service recovery
           - IPv4-only defaults disable wan6 auto-start, LAN RA/DHCPv6/NDP and IPv6 DNS advertisement
           - UU aarch64 runtime is pinned to NetEase openwrt-aarch64 generic mode (console-only discovery)
           - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints
+          - High-priority Tencent direct rule covers WeChat, QQ, qpic/gtimg/idqqimg/qlogo and weixinbridge media traffic
           - /etc/sysupgrade.conf explicitly retains network/PassWall/UU/SmartDNS/AdGuard user configuration
           - Existing WAN protocol is preserved across retained sysupgrade; PPPoE is never replaced by the DHCP fallback
           - If retained PPPoE credentials exist but proto is missing, PPPoE is reconstructed instead of falling back to DHCP
@@ -5712,10 +5904,10 @@ jobs:
           - SmartDNS clean-install default: port 6053
           - Tested upstreams: 223.5.5.5 and 119.29.29.29
           - SmartDNS does not auto-edit dnsmasq
-          - AdGuard Home keeps normal first-run user/password setup
-          - AdGuard DNS filter remains enabled by the normal clean-install default
-          - AdAway remains disabled by the normal clean-install default
-          - anti-AD (https://anti-ad.net/easylist.txt) is preloaded disabled after first-run setup, without overwriting retained user filters
+          - Clean installs ship a working AdGuard Home baseline on :3053; retained upgrades preserve the existing YAML and credentials
+          - AdGuard DNS filter is enabled in the clean-install baseline
+          - anti-AD remains preloaded but disabled by default
+          - Existing retained filters and user rules are preserved by sysupgrade; the baseline does not overwrite them
           - When AdGuard is actually listening on 3053, R4 automatically wires:
             dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
           - PassWall DNS redirect is disabled when this validated chain activates
@@ -5956,7 +6148,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R4 stable build finished"
+          echo "DoorNet2 R4 V5.2 Final build finished"
           echo "========================================"
 
           echo
@@ -6242,7 +6434,7 @@ jobs:
           echo "===== ONLINE NETWORK APPS ====="
 
           grep -q \
-            "DOORNET2_NETWORK_APPS='smartdns-adguard-chain-uu-generic-online-v4'" \
+            "DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-generic-online-v5'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
@@ -6318,112 +6510,43 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R4 DESIGN + QUICKSTART UI ====="
+          echo "===== V5.2 FINAL OFFICIAL LUCI + OPTIONAL QUICKSTART ====="
 
           grep -q \
-            "DOORNET2_UI='quickstart-design-dark-v1'" \
+            "DOORNET2_UI='official-luci-bootstrap-v1'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-bootstrap=y$' .config
+
+          ! grep -q '^CONFIG_PACKAGE_luci-theme-design=y$' .config
+          ! grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
+          ! grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
 
           test -f feeds/nas/network/services/quickstart/Makefile
           test -f feeds/nas_luci/luci/luci-app-quickstart/Makefile
-          test -f package/lean/luci-theme-design/Makefile
-          test -f package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
-          test -f package/lean/luci-theme-design/htdocs/luci-static/design/css/style.css
-
-          grep -q '/cgi-bin/luci/admin/quickstart/' \
-            package/lean/luci-theme-design/luasrc/view/themes/design/header.htm
 
           test -x files/etc/uci-defaults/95-doornet2-ui
-          grep -q "mediaurlbase='/luci-static/design'" \
+          sh -n files/etc/uci-defaults/95-doornet2-ui
+          grep -q "mediaurlbase='/luci-static/bootstrap'" \
+            files/etc/uci-defaults/95-doornet2-ui
+          grep -q "delete luci.themes.Design" \
+            files/etc/uci-defaults/95-doornet2-ui
+          grep -q "delete luci.themes.Argon" \
             files/etc/uci-defaults/95-doornet2-ui
 
-          test -f files/etc/config/design
-          grep -q "option mode 'dark'" files/etc/config/design
-          grep -q "option navbar_proxy 'passwall'" files/etc/config/design
+          test -x files/etc/uci-defaults/99-doornet2-official-ui
+          sh -n files/etc/uci-defaults/99-doornet2-official-ui
+          grep -q "mediaurlbase='/luci-static/bootstrap'" \
+            files/etc/uci-defaults/99-doornet2-official-ui
 
-          DESIGN_IPK="$(
-            find ./bin \
-              -type f \
-              -name 'luci-theme-design_*.ipk' \
-              -print \
-              | head -n 1
-          )"
+          test ! -e package/lean/luci-theme-design
+          test ! -e package/lean/luci-theme-argon
+          test ! -e package/lean/luci-app-argon-config
+          test ! -e files/etc/config/design
 
-          if [ -z "$DESIGN_IPK" ]; then
-              echo "ERROR: luci-theme-design IPK was not generated."
-              exit 1
-          fi
-
-          echo "Design package: $DESIGN_IPK"
-
-          ROOT_DESIGN_HEADER="$(
-            find build_dir \
-              -type f \
-              -path '*/root-*/usr/lib/lua/luci/view/themes/design/header.htm' \
-              -print \
-              | head -n 1
-          )"
-
-          if [ -z "$ROOT_DESIGN_HEADER" ]; then
-              echo "ERROR: installed Design header not found in build root."
-              exit 1
-          fi
-
-          grep -q '</head>' "$ROOT_DESIGN_HEADER"
-
-          ROOT_DESIGN_CSS="$(
-            find build_dir \
-              -type f \
-              -path '*/root-*/www/luci-static/design/css/style.css' \
-              -print \
-              | head -n 1
-          )"
-
-          if [ -z "$ROOT_DESIGN_CSS" ]; then
-              echo "ERROR: installed Design static CSS not found in build root."
-              exit 1
-          fi
-
-          ROOT_HEADER_FIX="$(
-            find build_dir \
-              -type f \
-              -path '*/root-*/etc/uci-defaults/99-doornet2-design-header-fix' \
-              -print \
-              | head -n 1
-          )"
-
-          ROOT_UI_DEFAULT="$(
-            find build_dir \
-              -type f \
-              -path '*/root-*/etc/uci-defaults/95-doornet2-ui' \
-              -print \
-              | head -n 1
-          )"
-
-          test -n "$ROOT_HEADER_FIX"
-          test -n "$ROOT_UI_DEFAULT"
-
-          sh -n "$ROOT_HEADER_FIX"
-          grep -q 'themes/design/header.htm' "$ROOT_HEADER_FIX"
-          grep -q '/cgi-bin/luci/admin/quickstart/' "$ROOT_HEADER_FIX"
-
-          sh -n "$ROOT_UI_DEFAULT"
-          grep -q "mediaurlbase='/luci-static/design'" "$ROOT_UI_DEFAULT"
-
-          echo "===== VERIFY FLOATING BADGE REMOVED ====="
-
-          ! grep -Rqs 'runtime-monitor.css' files package/lean/luci-theme-design 2>/dev/null
-          ! grep -Rqs 'runtime-monitor.js' files package/lean/luci-theme-design 2>/dev/null
-          ! grep -Rqs 'dn-runtime-monitor' files package/lean/luci-theme-design 2>/dev/null
-
-          echo "Floating CPU/date/time badge removed (OK)"
-
+          echo "Official LuCI Bootstrap policy verified (OK)."
 
           echo
           echo "===== R4 TIME / CPU TEMP POLICY ====="
@@ -6437,8 +6560,10 @@ jobs:
           grep -q "zonename='Asia/Shanghai'" \
             files/etc/uci-defaults/98-doornet2-time
 
-          test -x files/etc/uci-defaults/99-doornet2-design-header-fix
-          sh -n files/etc/uci-defaults/99-doornet2-design-header-fix
+          test -x files/etc/uci-defaults/99-doornet2-official-ui
+          sh -n files/etc/uci-defaults/99-doornet2-official-ui
+          grep -q "mediaurlbase='/luci-static/bootstrap'" \
+            files/etc/uci-defaults/99-doornet2-official-ui
 
           # Thermal support is intentionally left to the existing RK3399/
           # LuCI status stack. R4 adds no floating monitor frontend.
@@ -6455,6 +6580,21 @@ jobs:
           grep -q 'domain:speedtest.net' files/etc/uci-defaults/96-doornet2-passwall-shunt
           grep -q 'domain:router.uu.163.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
           grep -q 'domain:uu.gdl.netease.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'DN_TencentDirect' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'domain:qpic.cn' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'domain:gtimg.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q 'domain:qlogo.cn' files/etc/uci-defaults/96-doornet2-passwall-shunt
+          grep -q "R4Shunt.DN_TencentDirect='_direct'" files/etc/uci-defaults/96-doornet2-passwall-shunt
+
+          test -s files/etc/adguardhome.yaml
+          grep -q 'port: 3053' files/etc/adguardhome.yaml
+          grep -q '127.0.0.1:6053' files/etc/adguardhome.yaml
+          grep -q 'name: AdGuard DNS filter' files/etc/adguardhome.yaml
+          grep -B2 -A2 'name: anti-AD' files/etc/adguardhome.yaml | grep -q 'enabled: false'
+          grep -A2 'name: anti-AD' files/etc/adguardhome.yaml | grep -q 'id: 900001'
+
+          grep -q 'uuplugin.@uuplugin\[0\].enable' files/etc/init.d/uu-delay
+          grep -q 'delete uuplugin.@uuplugin\[0\].enabled' files/etc/uci-defaults/97-doornet2-network-apps
 
           test -x files/etc/uci-defaults/93-doornet2-ipv4-only
           sh -n files/etc/uci-defaults/93-doornet2-ipv4-only
