@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-V5.3-Final-DualStack-Argon
+name: DoorNet2-OpenWrt-iStore-R4-V5.3.1-Final-DualStack-Argon
 
 on:
   workflow_dispatch:
@@ -572,19 +572,36 @@ jobs:
 
           echo "QuickStart stays installed as an optional application only."
 
-          # Remove stale custom theme copies, then add the official Argon v2.4.7 source.
+          # DoorNet2 still uses the classic Lua LuCI stack.  Use the Argon
+          # package supplied by the matching LuCI feed instead of forcing the
+          # modern Argon v2.x/ucode branch into an incompatible userspace.
           rm -rf \
             package/lean/luci-theme-design \
             package/lean/luci-theme-argon \
             package/lean/luci-app-argon-config \
             package/doornet2/luci-theme-argon
 
-          git clone --depth 1 --branch v2.4.7 \
-            https://github.com/jerrykuku/luci-theme-argon.git \
-            package/doornet2/luci-theme-argon
+          ./scripts/feeds install -f -p luci luci-theme-argon
 
-          test -f package/doornet2/luci-theme-argon/Makefile
-          echo "Argon v2.4.7 source added; Bootstrap remains installed as fallback."
+          ARGON_MK=""
+          for candidate in \
+            package/feeds/luci/luci-theme-argon/Makefile \
+            feeds/luci/themes/luci-theme-argon/Makefile
+          do
+              if [ -f "$candidate" ]; then
+                  ARGON_MK="$candidate"
+                  break
+              fi
+          done
+
+          if [ -z "$ARGON_MK" ]; then
+              echo "ERROR: Lua-compatible luci-theme-argon was not found in the LuCI feed."
+              exit 1
+          fi
+
+          echo "Using Lua-compatible Argon package: $ARGON_MK"
+          grep -nE 'PKG_VERSION|PKG_RELEASE|LUCI_TITLE' "$ARGON_MK" | head -20 || true
+          echo "Bootstrap remains installed as fallback."
 
 
       - name: Configure DoorNet2 Argon LuCI defaults
@@ -596,8 +613,8 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R4 V5.3 UI policy:
-          # Use Argon v2.4.7 as the default LuCI shell.
+          # DoorNet2 R4 V5.3.1 UI policy:
+          # Use the Lua-compatible Argon feed package as the default LuCI shell.
           # Keep Bootstrap installed as a safe fallback.
           # QuickStart remains available from the menu but is NOT the homepage.
 
@@ -751,7 +768,7 @@ jobs:
             cache_ttl_max: 0
             cache_optimistic: false
             bogus_nxdomain: []
-            aaaa_disabled: true
+            aaaa_disabled: false
             enable_dnssec: false
             edns_client_subnet:
               custom_ip: ""
@@ -904,7 +921,11 @@ jobs:
           rm -f "$TMP"
 
           if [ "$WAS_RUNNING" = '1' ]; then
-              /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+              if [ -x /etc/init.d/doornet2-dns-chain ]; then
+                  /etc/init.d/doornet2-dns-chain restart >/dev/null 2>&1 || true
+              else
+                  /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+              fi
           fi
 
           exit 0
@@ -912,6 +933,35 @@ jobs:
 
           chmod 755 files/usr/bin/doornet2-adguard-filter-defaults
           sh -n files/usr/bin/doornet2-adguard-filter-defaults
+
+          # Copy the package's native AdGuard init script into the rootfs
+          # overlay, then override only service_triggers().  This preserves
+          # package-specific start/stop behavior while removing interface-up
+          # auto-restarts that can race SmartDNS.  Configuration reloads are
+          # still supported.
+          ADGUARD_INIT_SRC="$(
+            find feeds -type f -path '*/adguardhome/files/adguardhome.init' -print | head -n 1
+          )"
+
+          if [ -z "$ADGUARD_INIT_SRC" ] || [ ! -f "$ADGUARD_INIT_SRC" ]; then
+              echo "ERROR: AdGuard Home init source not found"
+              exit 1
+          fi
+
+          cp "$ADGUARD_INIT_SRC" files/etc/init.d/adguardhome
+
+          cat >> files/etc/init.d/adguardhome <<'EOF'
+
+          # DoorNet2 V5.3.1: DNS-chain helper owns WAN/boot ordering.
+          # Do not let AdGuard independently restart on interface-up events.
+          service_triggers()
+          {
+              procd_add_reload_trigger "adguardhome"
+          }
+          EOF
+
+          chmod 755 files/etc/init.d/adguardhome
+          sh -n files/etc/init.d/adguardhome
 
           cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
           #!/bin/sh
@@ -962,15 +1012,16 @@ jobs:
               /etc/init.d/smartdns enable >/dev/null 2>&1 || true
           fi
 
-          # If AdGuard was retained from an earlier install, keep it enabled,
-          # but do not start it here.  The DNS-chain helper owns the strict
-          # startup order: SmartDNS :6053 first, then AdGuard :3053, then
-          # dnsmasq is pointed at :3053.
+          # DoorNet2 DNS-chain helper is the sole boot coordinator for
+          # AdGuard Home.  Disable AdGuard's own rc.d boot symlink so it cannot
+          # race SmartDNS and generate transient 127.0.0.1:6053 connection
+          # refusals.  The service remains fully usable and is started by
+          # doornet2-dns-chain only after SmartDNS :6053 is listening.
           if [ -x /etc/init.d/adguardhome ]; then
               if [ -s /etc/adguardhome.yaml ]; then
                   [ -x /usr/bin/doornet2-adguard-filter-defaults ] && \
                     /usr/bin/doornet2-adguard-filter-defaults >/dev/null 2>&1 || true
-                  /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
+                  /etc/init.d/adguardhome disable >/dev/null 2>&1 || true
               fi
           fi
 
@@ -1095,7 +1146,6 @@ jobs:
                   fi
 
                   if [ -s /etc/adguardhome.yaml ] && [ -x /etc/init.d/adguardhome ]; then
-                      /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
                       /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
                   fi
 
@@ -1110,8 +1160,11 @@ jobs:
                           exit 0
                       fi
 
+                      # SmartDNS is already ready at this point, so a retry is
+                      # safe.  Keep AdGuard rc.d-disabled; the coordinator owns
+                      # boot order and may retry the service while waiting.
                       if [ -s /etc/adguardhome.yaml ] && [ -x /etc/init.d/adguardhome ]; then
-                          /etc/init.d/adguardhome enable >/dev/null 2>&1 || true
+                          /etc/init.d/adguardhome start >/dev/null 2>&1 || true
                       fi
 
                       sleep 15
@@ -1641,7 +1694,7 @@ jobs:
           echo "===== RELEASE ====="
           if [ -r /etc/doornet2_release ]; then
               grep -E \
-                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IPV4_ONLY|UU_RUNTIME|PERSISTENCE|WAN_POLICY|SELFHEAL)=" \
+                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IP_POLICY|UU_RUNTIME|PERSISTENCE|WAN_POLICY|SELFHEAL)=" \
                 /etc/doornet2_release 2>/dev/null || true
           else
               warn "/etc/doornet2_release missing"
@@ -1854,15 +1907,15 @@ jobs:
               fi
           fi
 
-          if [ -s /etc/adguardhome.yaml ] && /etc/init.d/adguardhome enabled >/dev/null 2>&1; then
+          if [ -s /etc/adguardhome.yaml ]; then
               [ -x /usr/bin/doornet2-adguard-filter-defaults ] && \
                 /usr/bin/doornet2-adguard-filter-defaults >>"$LOG" 2>&1 || true
 
               if port_ready 3053; then
                   clear_fail adguard
               elif second_fail adguard; then
-                  log_msg "repair AdGuard Home :3053"
-                  /etc/init.d/adguardhome restart >>"$LOG" 2>&1 || true
+                  log_msg "repair DNS chain / AdGuard Home :3053"
+                  /etc/init.d/doornet2-dns-chain restart >>"$LOG" 2>&1 || true
                   clear_fail adguard
               else
                   log_msg "AdGuard miss 1/2"
@@ -1958,7 +2011,7 @@ jobs:
       # ============================================================
       # 4. R4 Argon LuCI UI strategy
       #
-      # Argon v2.4.7 shell with Bootstrap retained as fallback.
+      # Lua-compatible Argon shell with Bootstrap retained as fallback.
       # QuickStart stays installed only as an optional app.
       # ============================================================
 
@@ -1980,7 +2033,8 @@ jobs:
           grep -q "delete luci.themes.Design" \
             files/etc/uci-defaults/95-doornet2-ui
 
-          test -f package/doornet2/luci-theme-argon/Makefile
+          test -f package/feeds/luci/luci-theme-argon/Makefile || \
+            test -f feeds/luci/themes/luci-theme-argon/Makefile
           test ! -e package/lean/luci-theme-design
           test ! -e files/etc/config/design
 
@@ -2413,7 +2467,7 @@ jobs:
           DOORNET2_MMC_LAYOUT='mmcblk0-tf-mmcblk1-emmc'
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
-          DOORNET2_UI='argon-v2.4.7-with-bootstrap-fallback-v1'
+          DOORNET2_UI='argon-lua-compatible-with-bootstrap-fallback-v1'
           DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'
           DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-generic-online-v5'
           DOORNET2_SHUNT='preset-rules-tencent-direct-login-safe-v4'
@@ -2421,9 +2475,9 @@ jobs:
           DOORNET2_PASSWALL_DELAY='route-aware-v1'
           DOORNET2_UU_DELAY='route-aware-retry-field-migrate-v2'
           DOORNET2_HEALTH='selfcheck-selfheal-v2'
-          DOORNET2_FINAL_PROFILE='stable-final-v5.3-dualstack-proxyv4-argon'
+          DOORNET2_FINAL_PROFILE='stable-final-v5.3.1-dualstack-proxyv4-argon'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
-          DOORNET2_IPV4_ONLY='wan6-ra-dhcpv6-disabled-v1'
+          DOORNET2_IP_POLICY='domestic-dualstack-proxy-ipv4only-v1'
           DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
           DOORNET2_PERSISTENCE='sysupgrade-explicit-adguard-v2'
           DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'
@@ -5347,8 +5401,8 @@ jobs:
           CONFIG_PACKAGE_luci-app-quickstart=y
           CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
 
-          # V5.3 UI:
-          # Argon v2.4.7 is default; Bootstrap stays as fallback.
+          # V5.3.1 UI:
+          # Lua-compatible Argon is default; Bootstrap stays as fallback.
           # QuickStart is installed above as an optional app, not as homepage.
           CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-theme-argon=y
@@ -5557,7 +5611,7 @@ jobs:
             files/etc/uci-defaults/96-doornet2-passwall-shunt
 
           echo
-          echo "===== V5.3 DUALSTACK + PROXY IPv4 + ARGON PACKAGES ====="
+          echo "===== V5.3.1 DUALSTACK + PROXY IPv4 + ARGON PACKAGES ====="
 
           grep -E \
             '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap)=y$' \
@@ -5710,6 +5764,17 @@ jobs:
           grep -q '127.0.0.1:6053' "$ROOTFS_DIR/etc/adguardhome.yaml"
           grep -q 'name: AdGuard DNS filter' "$ROOTFS_DIR/etc/adguardhome.yaml"
           grep -q 'name: anti-AD' "$ROOTFS_DIR/etc/adguardhome.yaml"
+          grep -q 'aaaa_disabled: false' "$ROOTFS_DIR/etc/adguardhome.yaml"
+
+          # AdGuard must be coordinated by doornet2-dns-chain at boot.
+          DNS_CHAIN_FILE="$ROOTFS_DIR/etc/init.d/doornet2-dns-chain"
+          test -x "$DNS_CHAIN_FILE"
+          grep -q 'SmartDNS :6053 ready' "$DNS_CHAIN_FILE"
+          grep -q 'AdGuard :3053 ready' "$DNS_CHAIN_FILE"
+          grep -q '/etc/init.d/adguardhome disable' "$ROOTFS_DIR/etc/uci-defaults/97-doornet2-network-apps"
+          test -x "$ROOTFS_DIR/etc/init.d/adguardhome"
+          grep -q 'DNS-chain helper owns WAN/boot ordering' "$ROOTFS_DIR/etc/init.d/adguardhome"
+          grep -q 'procd_add_reload_trigger "adguardhome"' "$ROOTFS_DIR/etc/init.d/adguardhome"
 
           SHUNT_FILE="$ROOTFS_DIR/etc/uci-defaults/96-doornet2-passwall-shunt"
           test -f "$SHUNT_FILE"
@@ -5841,9 +5906,9 @@ jobs:
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
             "network_apps": "passwall-smartdns-adguard-persist-uu-generic-online-v5",
-            "ui": "argon-v2.4.7-with-bootstrap-fallback-v1",
+            "ui": "argon-lua-compatible-with-bootstrap-fallback-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
-            "ipv4_only": "wan6-ra-dhcpv6-disabled-v1",
+            "ip_policy": "domestic-dualstack-proxy-ipv4only-v1",
             "uu_runtime": "openwrt-aarch64-console-only-v1",
             "persistence": "sysupgrade-explicit-adguard-v2",
             "wan_policy": "preserve-existing-proto-and-pppoe-creds-v2",
@@ -5855,7 +5920,7 @@ jobs:
             "passwall_delay": "route-aware-v1",
             "uu_delay": "route-aware-retry-field-migrate-v2",
             "health_check": "selfcheck-selfheal-v2",
-            "profile": "stable-final-v5.3-dualstack-proxyv4-argon",
+            "profile": "stable-final-v5.3.1-dualstack-proxyv4-argon",
             "release": "R4"
           }
           EOF
@@ -5898,10 +5963,10 @@ jobs:
 
           R4 stable interface:
 
-          - Argon v2.4.7 is the default LuCI shell; Bootstrap is retained as fallback
+          - Lua-compatible Argon from the matching LuCI feed is the default shell; Bootstrap is retained as fallback
           - Normal LuCI Status / Overview is the homepage
           - QuickStart remains installed only as an optional application page
-          - Legacy Design is not included; Argon is compiled from the official v2.4.7 source
+          - Legacy Design is not included; Argon is selected from the matching Lua LuCI feed for compatibility
           - No top-right floating CPU/date/time badge is injected
           - CPU temperature remains available in the normal system/CPU status line when supported
           - Timezone/NTP remain configured for Asia/Shanghai
@@ -5917,7 +5982,7 @@ jobs:
           R4 FINAL stability profile:
 
           - LAN management IP remains 192.168.100.1
-          - Argon v2.4.7 + normal Status/Overview are the default experience
+          - Lua-compatible Argon + normal Status/Overview are the default experience
           - The old top-right CPU/date/time floating badge stays removed
           - TF-first / eMMC-fallback boot and physical upgrade guards are retained
           - Online firmware updater, PassWall updater and network-app updater are retained
@@ -6155,48 +6220,62 @@ jobs:
       # ============================================================
 
       - name: Publish firmware release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
-          if gh release view \
-            "${DOORNET2_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            >/dev/null 2>&1
-          then
-
-              gh release upload \
-                "${DOORNET2_TAG}" \
-                "${GITHUB_WORKSPACE}/artifact/release/DoorNet2-ext4-sysupgrade.img.gz" \
-                "${GITHUB_WORKSPACE}/artifact/release/sha256sums.txt" \
-                "${GITHUB_WORKSPACE}/artifact/release/version.json" \
-                "${GITHUB_WORKSPACE}/artifact/release/release-notes.md" \
-                --repo "${GITHUB_REPOSITORY}" \
-                --clobber
-
-              gh release edit \
+          publish_release()
+          {
+              if gh release view \
                 "${DOORNET2_TAG}" \
                 --repo "${GITHUB_REPOSITORY}" \
-                --title "DoorNet2 ${DOORNET2_VERSION}" \
-                --notes-file \
-                "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+                >/dev/null 2>&1
+              then
+                  gh release upload \
+                    "${DOORNET2_TAG}" \
+                    "${GITHUB_WORKSPACE}/artifact/release/DoorNet2-ext4-sysupgrade.img.gz" \
+                    "${GITHUB_WORKSPACE}/artifact/release/sha256sums.txt" \
+                    "${GITHUB_WORKSPACE}/artifact/release/version.json" \
+                    "${GITHUB_WORKSPACE}/artifact/release/release-notes.md" \
+                    --repo "${GITHUB_REPOSITORY}" \
+                    --clobber
 
-          else
+                  gh release edit \
+                    "${DOORNET2_TAG}" \
+                    --repo "${GITHUB_REPOSITORY}" \
+                    --title "DoorNet2 ${DOORNET2_VERSION}" \
+                    --notes-file \
+                    "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+              else
+                  gh release create \
+                    "${DOORNET2_TAG}" \
+                    "${GITHUB_WORKSPACE}/artifact/release/DoorNet2-ext4-sysupgrade.img.gz" \
+                    "${GITHUB_WORKSPACE}/artifact/release/sha256sums.txt" \
+                    "${GITHUB_WORKSPACE}/artifact/release/version.json" \
+                    "${GITHUB_WORKSPACE}/artifact/release/release-notes.md" \
+                    --repo "${GITHUB_REPOSITORY}" \
+                    --target "${GITHUB_SHA}" \
+                    --title "DoorNet2 ${DOORNET2_VERSION}" \
+                    --notes-file \
+                    "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+              fi
+          }
 
-              gh release create \
-                "${DOORNET2_TAG}" \
-                "${GITHUB_WORKSPACE}/artifact/release/DoorNet2-ext4-sysupgrade.img.gz" \
-                "${GITHUB_WORKSPACE}/artifact/release/sha256sums.txt" \
-                "${GITHUB_WORKSPACE}/artifact/release/version.json" \
-                "${GITHUB_WORKSPACE}/artifact/release/release-notes.md" \
-                --repo "${GITHUB_REPOSITORY}" \
-                --target "${GITHUB_SHA}" \
-                --title "DoorNet2 ${DOORNET2_VERSION}" \
-                --notes-file \
-                "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+              if publish_release; then
+                  echo "Firmware release published on attempt $attempt"
+                  exit 0
+              fi
+              echo "WARN: firmware release publish attempt $attempt failed"
+              attempt=$((attempt + 1))
+              sleep 20
+          done
 
-          fi
+          echo "WARN: firmware image/artifacts are valid, but GitHub Release publication failed after retries."
+          exit 1
 
 
       # ============================================================
@@ -6204,11 +6283,12 @@ jobs:
       # ============================================================
 
       - name: Final build verification
+        if: always()
         run: |
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R4 V5.3 DualStack + ProxyIPv4 + Argon Final build finished"
+          echo "DoorNet2 R4 V5.3.1 DualStack + ProxyIPv4 + Argon Final build finished"
           echo "========================================"
 
           echo
@@ -6570,10 +6650,10 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== V5.3 FINAL ARGON + BOOTSTRAP FALLBACK ====="
+          echo "===== V5.3.1 FINAL ARGON + BOOTSTRAP FALLBACK ====="
 
           grep -q \
-            "DOORNET2_UI='argon-v2.4.7-with-bootstrap-fallback-v1'" \
+            "DOORNET2_UI='argon-lua-compatible-with-bootstrap-fallback-v1'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
@@ -6601,7 +6681,8 @@ jobs:
           grep -q "mediaurlbase='/luci-static/argon'" \
             files/etc/uci-defaults/99-doornet2-argon-ui
 
-          test -f package/doornet2/luci-theme-argon/Makefile
+          test -f package/feeds/luci/luci-theme-argon/Makefile || \
+            test -f feeds/luci/themes/luci-theme-argon/Makefile
           test ! -e package/lean/luci-theme-design
           test ! -e files/etc/config/design
 
@@ -6649,6 +6730,7 @@ jobs:
           grep -q 'port: 3053' files/etc/adguardhome.yaml
           grep -q '127.0.0.1:6053' files/etc/adguardhome.yaml
           grep -q 'name: AdGuard DNS filter' files/etc/adguardhome.yaml
+          grep -q 'aaaa_disabled: false' files/etc/adguardhome.yaml
           grep -B2 -A2 'name: anti-AD' files/etc/adguardhome.yaml | grep -q 'enabled: false'
           grep -A2 'name: anti-AD' files/etc/adguardhome.yaml | grep -q 'id: 900001'
 
@@ -6665,6 +6747,10 @@ jobs:
           grep -q "ipv6_tproxy='0'" files/etc/uci-defaults/96-doornet2-passwall-shunt
           grep -q 'SmartDNS :6053 ready' files/etc/init.d/doornet2-dns-chain
           grep -q 'AdGuard :3053 ready' files/etc/init.d/doornet2-dns-chain
+          test -x files/etc/init.d/adguardhome
+          sh -n files/etc/init.d/adguardhome
+          grep -q 'DNS-chain helper owns WAN/boot ordering' files/etc/init.d/adguardhome
+          grep -q 'procd_add_reload_trigger "adguardhome"' files/etc/init.d/adguardhome
 
           test -s files/etc/sysupgrade.conf
           test -x files/usr/bin/doornet2-adguard-filter-defaults
