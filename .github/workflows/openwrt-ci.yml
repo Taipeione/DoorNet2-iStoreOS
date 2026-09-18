@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-V5.3.2-Final-SlimUI-Argon181
+name: DoorNet2-OpenWrt-iStore-R4-V5.3.2-Final-SlimUI-Argon181-BootFix
 
 on:
   workflow_dispatch:
@@ -5799,6 +5799,31 @@ jobs:
       # 16. Compile
       # ============================================================
 
+      - name: Pin PassWall boot order
+        run: |
+          set -e
+
+          PASSWALL_INIT_SRC="$(
+            find feeds package               -type f               -path '*/luci-app-passwall/root/etc/init.d/passwall'               -print             | head -n 1
+          )"
+
+          if [ -z "$PASSWALL_INIT_SRC" ]; then
+              echo "ERROR: PassWall init source not found"
+              exit 1
+          fi
+
+          echo "PassWall init source: $PASSWALL_INIT_SRC"
+          echo "Before:"
+          grep -n '^START=' "$PASSWALL_INIT_SRC" || true
+
+          sed -i -E             's/^START=[0-9]+$/START=19/'             "$PASSWALL_INIT_SRC"
+
+          echo "After:"
+          grep -n '^START=' "$PASSWALL_INIT_SRC"
+
+          grep -Eq '^START=19$' "$PASSWALL_INIT_SRC"
+
+
       - name: Compile firmware
         run: |
           make -j$(nproc) || \
@@ -5868,6 +5893,11 @@ jobs:
           test -x "$PASSWALL_INIT_FILE"
           test -x "$PASSWALL_DELAY_FILE"
           test -x "$RC_CLEANUP_FILE"
+          echo "Rootfs service START values:"
+          grep -n '^START=' "$PASSWALL_INIT_FILE" || true
+          grep -n '^START=' "$PASSWALL_DELAY_FILE" || true
+          grep -n '^START=' "$DNS_CHAIN_FILE" || true
+
           grep -Eq '^START=19$' "$PASSWALL_INIT_FILE"
           grep -Eq '^START=99$' "$PASSWALL_DELAY_FILE"
           grep -Eq '^START=98$' "$DNS_CHAIN_FILE"
@@ -6888,7 +6918,11 @@ jobs:
           echo
           echo "===== RELEASE FILES ====="
 
-          ls -lah ./artifact/release/
+          if [ -d ./artifact/release ]; then
+              ls -lah ./artifact/release/
+          else
+              echo "INFO: ./artifact/release was not prepared because an earlier required step failed."
+          fi
 
 
           echo
