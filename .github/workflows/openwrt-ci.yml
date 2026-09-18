@@ -417,6 +417,12 @@ jobs:
 
           echo "===== REPLACE LEGACY UU WITH RUNTIME-DOWNLOAD LUCI PLUGIN ====="
 
+        # FIX3: remove legacy UU feed packages before runtime UU injection
+        rm -rf package/feeds/packages/uugamebooster || true
+        rm -rf package/feeds/luci/luci-app-uugamebooster || true
+        rm -rf feeds/packages/net/uugamebooster || true
+        rm -rf feeds/luci/applications/luci-app-uugamebooster || true
+
           # The legacy uugamebooster package downloads a fixed NetEase tarball
           # during firmware compilation. NetEase currently returns HTTP 403 for
           # that old URL, which aborts the entire image build.
