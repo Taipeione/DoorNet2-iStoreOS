@@ -521,9 +521,9 @@ jobs:
               raise SystemExit("ERROR: UU URL/MD5 parser lines not found")
           i = m.group("i")
           parse_new = (
-              f'{i}plugin_url="${{UU_url%%,*}}"\n'
-              f'{i}plugin_md5="$(echo "$UU_url" | cut -d, -f2)"\n'
-              f'{i}plugin_backup_url="$(echo "$UU_url" | cut -d, -f3)"'
+              i + 'plugin_url="${UU_url%%,*}"\n'
+              + f'{i}plugin_md5="$(echo "$UU_url" | cut -d, -f2)"\n'
+              + f'{i}plugin_backup_url="$(echo "$UU_url" | cut -d, -f3)"'
           )
           text = text[:m.start()] + parse_new + text[m.end():]
 
