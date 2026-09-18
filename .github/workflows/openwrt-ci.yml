@@ -1,4 +1,4 @@
-name: DoorNet2-OpenWrt-iStore-R4-V5.3.2-Final-SlimUI-Argon181-BootFix
+name: DoorNet2-OpenWrt-iStore-R4-V5.3.3-Final-Solidified-SlimUI-Argon181-BootFix
 
 on:
   workflow_dispatch:
@@ -476,6 +476,7 @@ jobs:
           p = Path(sys.argv[1])
           text = p.read_text()
 
+          # Generic aarch64 only: never fall back to H3C NX30 Pro.
           text, n = re.subn(
               r'(?m)^(\s*)UU_url="http://uu\.gdl\.netease\.com/uuplugin/h3c-nx30pro/[^"]*"$',
               r'\1echo "Generic openwrt-aarch64 lookup failed; refusing H3C fallback"\n\1return 1',
@@ -494,12 +495,94 @@ jobs:
               + '\n\t[ -n "$enabled" ] || enabled="$(uci -q get uuplugin.@uuplugin[0].enabled)"',
               1,
           )
+
+          # Query the API once. The response format validated on RK3399 is:
+          #   primary_url,md5,backup_url
+          api_re = re.compile(
+              r'(?m)^(?P<i>\s*)UU_url=\$\(curl .*Accept:text/plain.*\)$'
+          )
+          m = api_re.search(text)
+          if not m:
+              raise SystemExit("ERROR: UU API query line not found")
+          i = m.group("i")
+          api_new = (
+              f'{i}UU_url=$(curl -L -s -k -H "Accept:text/plain" "$uuurl" 2>/dev/null)\n'
+              f'{i}[ -n "$UU_url" ] || UU_url=$(wget --header=Accept:text/plain -q --no-check-certificate -O - "$uuurl" 2>/dev/null)\n'
+              f'{i}UU_url="$(printf \'%s\' "$UU_url" | tr -d \'\\r\\n\')"'
+          )
+          text = text[:m.start()] + api_new + text[m.end():]
+
+          parse_re = re.compile(
+              r'(?m)^(?P<i>\s*)plugin_url=\$\(echo "\$UU_url" \| cut\s+-d \',\' -f 1\)\s*\n'
+              r'(?P=i)plugin_md5=\$\(echo "\$UU_url" \| cut\s+-d \',\' -f 2\)\s*$'
+          )
+          m = parse_re.search(text)
+          if not m:
+              raise SystemExit("ERROR: UU URL/MD5 parser lines not found")
+          i = m.group("i")
+          parse_new = (
+              f'{i}plugin_url="${{UU_url%%,*}}"\n'
+              f'{i}plugin_md5="$(echo "$UU_url" | cut -d, -f2)"\n'
+              f'{i}plugin_backup_url="$(echo "$UU_url" | cut -d, -f3)"'
+          )
+          text = text[:m.start()] + parse_new + text[m.end():]
+
+          dl_re = re.compile(
+              r'(?ms)^(?P<i>\s*)echo "下载\$plugin_url 到/tmp/uu\.tar\.gz"\s*\n'
+              r'.*?^(?P=i)fi\s*$'
+          )
+          m = dl_re.search(text)
+          if not m:
+              raise SystemExit("ERROR: UU download/verify block not found")
+          i = m.group("i")
+          dl_new = f'''{i}echo "下载$plugin_url 到/tmp/uu.tar.gz.part"
+          {i}rm -f /tmp/uu.tar.gz /tmp/uu.tar.gz.part
+          {i}download_ok=0
+          {i}for download_url in "$plugin_url" "$plugin_backup_url"; do
+          {i}  [ -n "$download_url" ] || continue
+          {i}  rm -f /tmp/uu.tar.gz.part
+          {i}  if curl -fL -sS -k "$download_url" -o /tmp/uu.tar.gz.part >/dev/null 2>&1 || \\
+          {i}     wget -q --no-check-certificate "$download_url" -O /tmp/uu.tar.gz.part >/dev/null 2>&1
+          {i}  then
+          {i}    download_md5="$(md5sum /tmp/uu.tar.gz.part 2>/dev/null | awk '{{print $1}}')"
+          {i}    if [ -n "$plugin_md5" ] && [ "$download_md5" = "$plugin_md5" ] && \\
+          {i}       tar tzf /tmp/uu.tar.gz.part >/dev/null 2>&1
+          {i}    then
+          {i}      download_ok=1
+          {i}      break
+          {i}    fi
+          {i}  fi
+          {i}done
+          {i}if [ "$download_ok" != "1" ]; then
+          {i}  echo "UU 下载/MD5/tar 校验失败"
+          {i}  rm -f /tmp/uu.tar.gz /tmp/uu.tar.gz.part
+          {i}  return 1
+          {i}fi
+          {i}mv /tmp/uu.tar.gz.part /tmp/uu.tar.gz
+          {i}echo "下载完成，开始解压到$PROG"
+          {i}if ! tar zxf /tmp/uu.tar.gz -C /var/tmp/uu; then
+          {i}  rm -f /tmp/uu.tar.gz
+          {i}  return 1
+          {i}fi
+          {i}rm -f /tmp/uu.tar.gz'''
+          text = text[:m.start()] + dl_new + text[m.end():]
+
           p.write_text(text)
           PY
+
+          sh -n "$UU_INIT"
+
+          grep -q 'plugin_backup_url=' "$UU_INIT"
+          grep -q '/tmp/uu.tar.gz.part' "$UU_INIT"
+          grep -q 'tar tzf /tmp/uu.tar.gz.part' "$UU_INIT"
+          grep -q 'rm -f /tmp/uu.tar.gz' "$UU_INIT"
 
           grep -q \
             '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' \
             "$UU_INIT"
+          grep -q 'plugin_backup_url=' "$UU_INIT"
+          grep -q '/tmp/uu.tar.gz.part' "$UU_INIT"
+          grep -q 'tar tzf /tmp/uu.tar.gz.part' "$UU_INIT"
 
           if grep -q 'h3c-nx30pro' "$UU_INIT"; then
               echo "ERROR: UU aarch64 path still contains h3c-nx30pro"
@@ -613,7 +696,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R4 V5.3.2 UI policy:
+          # DoorNet2 R4 V5.3.3 UI policy:
           # Use the Lua-compatible Argon feed package as the default LuCI shell.
           # Keep Bootstrap installed as a safe fallback.
           # QuickStart remains available from the menu but is NOT the homepage.
@@ -656,7 +739,7 @@ jobs:
           # slim-embedfire_doornet2-squashfs-sysupgrade.img.gz.
           # Only LuCI theme/configuration assets are overlaid; kernel,
           # drivers, network stack, PassWall, DNS, UU and upgrade logic
-          # remain the V5.3.2 Final implementation.
+          # remain the V5.3.3 Final implementation.
 
           mkdir -p /tmp/doornet2-slim-ui files
 
@@ -701,6 +784,26 @@ jobs:
             files/etc/init.d \
             files/etc/smartdns \
             files/usr/bin
+
+          # V5.3.3 field-validated OpenAI/ChatGPT SmartDNS policy.
+          # Domestic DNS remains dual-stack; only these proxy-domain answers
+          # are forced through proxy-test and have AAAA suppressed.
+          cat > files/etc/smartdns/custom.conf <<'EOF'
+          server-tcp 1.1.1.1:53 -group proxy-test
+          server-tcp 8.8.8.8:53 -group proxy-test
+          nameserver /chatgpt.com/proxy-test
+          nameserver /openai.com/proxy-test
+          nameserver /oaistatic.com/proxy-test
+          nameserver /oaiusercontent.com/proxy-test
+          nameserver /openaimerge.com/proxy-test
+          address /chatgpt.com/#6
+          address /openai.com/#6
+          address /oaistatic.com/#6
+          address /oaiusercontent.com/#6
+          address /openaimerge.com/#6
+          nameserver /openai.com.cdn.cloudflare.net/proxy-test
+          address /openai.com.cdn.cloudflare.net/#6
+          EOF
 
           cat > files/etc/uci-defaults/93-doornet2-dualstack-proxyv4 <<'EOF'
           #!/bin/sh
@@ -995,7 +1098,7 @@ jobs:
 
           cat >> files/etc/init.d/adguardhome <<'EOF'
 
-          # DoorNet2 V5.3.2: DNS-chain helper owns WAN/boot ordering.
+          # DoorNet2 V5.3.3: DNS-chain helper owns WAN/boot ordering.
           # Do not let AdGuard independently restart on interface-up events.
           service_triggers()
           {
@@ -1055,6 +1158,30 @@ jobs:
               /etc/init.d/smartdns enable >/dev/null 2>&1 || true
           fi
 
+          # Retained sysupgrades preserve /etc/smartdns/, so merge the
+          # V5.3.3 field-validated proxy-domain rules non-destructively.
+          SMARTDNS_CUSTOM='/etc/smartdns/custom.conf'
+          mkdir -p /etc/smartdns
+          touch "$SMARTDNS_CUSTOM"
+          for RULE in \
+              'server-tcp 1.1.1.1:53 -group proxy-test' \
+              'server-tcp 8.8.8.8:53 -group proxy-test' \
+              'nameserver /chatgpt.com/proxy-test' \
+              'nameserver /openai.com/proxy-test' \
+              'nameserver /oaistatic.com/proxy-test' \
+              'nameserver /oaiusercontent.com/proxy-test' \
+              'nameserver /openaimerge.com/proxy-test' \
+              'address /chatgpt.com/#6' \
+              'address /openai.com/#6' \
+              'address /oaistatic.com/#6' \
+              'address /oaiusercontent.com/#6' \
+              'address /openaimerge.com/#6' \
+              'nameserver /openai.com.cdn.cloudflare.net/proxy-test' \
+              'address /openai.com.cdn.cloudflare.net/#6'
+          do
+              grep -Fxq "$RULE" "$SMARTDNS_CUSTOM" || echo "$RULE" >>"$SMARTDNS_CUSTOM"
+          done
+
           # DoorNet2 DNS-chain helper is the sole boot coordinator for
           # AdGuard Home.  Disable AdGuard's own rc.d boot symlink so it cannot
           # race SmartDNS and generate transient 127.0.0.1:6053 connection
@@ -1089,7 +1216,9 @@ jobs:
               uci -q set uuplugin.@uuplugin[0].enable='1'
               uci -q delete uuplugin.@uuplugin[0].enabled
               uci -q commit uuplugin
-              /etc/init.d/uuplugin enable >/dev/null 2>&1 || true
+              # UU Guard 2.0 owns boot/start timing; keep uuplugin itself
+              # rc.d-disabled to avoid duplicate starts and download races.
+              /etc/init.d/uuplugin disable >/dev/null 2>&1 || true
           fi
 
           if [ -x /etc/init.d/doornet2-dns-chain ]; then
@@ -1227,6 +1356,59 @@ jobs:
           chmod 755 files/etc/init.d/doornet2-dns-chain
           sh -n files/etc/init.d/doornet2-dns-chain
 
+          cat > files/usr/bin/doornet2-dns-postpasswall <<'EOF'
+          #!/bin/sh
+
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+          LOG='/tmp/doornet2-dns-chain.log'
+          PW_DNSMASQ='/tmp/dnsmasq.d/dnsmasq-passwall.conf'
+          CHANGED=0
+
+          log_msg()
+          {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') post-passwall: $*" >>"$LOG"
+          }
+
+          # PassWall 25.1.15-1 on the validated V5.3.2/V5.3.3 baseline can
+          # generate a global dnsmasq bypass pointing ordinary client DNS at
+          # ChinaDNS-NG :15353. ChinaDNS-NG is PassWall-internal only.
+          #
+          # The audited generated file contained no ipset=/nftset= entries.
+          # Remove it only when one of the forbidden generic bypass directives
+          # is present; otherwise leave future PassWall-specific content alone.
+          if [ -f "$PW_DNSMASQ" ] && \
+             grep -Eq '^(server=127\.0\.0\.1#15353|all-servers|no-poll|no-resolv)[[:space:]]*$' "$PW_DNSMASQ"
+          then
+              rm -f "$PW_DNSMASQ"
+              log_msg "removed PassWall global dnsmasq bypass"
+              CHANGED=1
+          fi
+
+          CURRENT_SERVER="$(uci -q get dhcp.@dnsmasq[0].server)"
+          if [ "$CURRENT_SERVER" != '127.0.0.1#3053' ]; then
+              uci -q delete dhcp.@dnsmasq[0].server
+              uci -q add_list dhcp.@dnsmasq[0].server='127.0.0.1#3053'
+              CHANGED=1
+          fi
+
+          if [ "$(uci -q get dhcp.@dnsmasq[0].noresolv)" != '1' ]; then
+              uci -q set dhcp.@dnsmasq[0].noresolv='1'
+              CHANGED=1
+          fi
+
+          if [ "$CHANGED" = '1' ]; then
+              uci -q commit dhcp
+              /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+              log_msg "dnsmasq restarted after correction"
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-dns-postpasswall
+          sh -n files/usr/bin/doornet2-dns-postpasswall
+
           echo "===== R4 NETWORK DEFAULTS ====="
           grep -nE \
             '6053|223\.5\.5\.5|119\.29\.29\.29|auto_set_dnsmasq|3053' \
@@ -1283,7 +1465,8 @@ jobs:
           uci -q set "passwall.DN_ForcedDirect.domain_list=api.example.com
           domain:speedtest.net
           domain:router.uu.163.com
-          domain:uu.gdl.netease.com"
+          domain:uu.gdl.netease.com
+          domain:uurouter.gdl.netease.com"
 
           # High-priority mainland Tencent/WeChat media path.  V5.1
           # field testing showed that text messages could work while photo
@@ -1615,7 +1798,7 @@ jobs:
           chmod 755 files/etc/init.d/passwall-delay
           sh -n files/etc/init.d/passwall-delay
 
-          # V5.3.2: retained sysupgrades can carry stale rc.d links from earlier builds.
+          # V5.3.3: retained sysupgrades can carry stale rc.d links from earlier builds.
           # Keep exactly the verified startup ownership:
           #   S19 passwall / S98 doornet2-dns-chain / S99 passwall-delay.
           cat > files/etc/uci-defaults/98-doornet2-rc-cleanup <<'EOF'
@@ -1634,6 +1817,15 @@ jobs:
           fi
           if [ -x /etc/init.d/passwall-delay ]; then
               /etc/init.d/passwall-delay enable >/dev/null 2>&1 || true
+          fi
+          if [ -x /etc/init.d/uuplugin ]; then
+              /etc/init.d/uuplugin disable >/dev/null 2>&1 || true
+          fi
+          if [ -x /etc/init.d/uu-delay ]; then
+              /etc/init.d/uu-delay enable >/dev/null 2>&1 || true
+          fi
+          if [ -x /etc/init.d/doornet2-selfheal ]; then
+              /etc/init.d/doornet2-selfheal enable >/dev/null 2>&1 || true
           fi
 
           # Re-assert that the two known-bad duplicates are absent even if an
@@ -1669,62 +1861,193 @@ jobs:
             files/etc/uci-defaults \
             files/usr/bin
 
+          cat > files/usr/bin/doornet2-uu <<'EOF'
+          #!/bin/sh
+
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+          LOG='/tmp/uu-delay.log'
+          LOCK='/var/lock/doornet2-uu.lock'
+          LOG_LIMIT=65536
+          LOG_KEEP=300
+
+          mkdir -p /var/lock
+          exec 9>"$LOCK"
+          flock -n 9 || exit 0
+
+          rotate_log()
+          {
+              SIZE="$(wc -c <"$LOG" 2>/dev/null)"
+              case "$SIZE" in ''|*[!0-9]*) SIZE=0 ;; esac
+              if [ "$SIZE" -ge "$LOG_LIMIT" ]; then
+                  tail -n "$LOG_KEEP" "$LOG" >"${LOG}.tmp"
+                  mv "${LOG}.tmp" "$LOG"
+              fi
+          }
+
+          log_msg()
+          {
+              echo "$(date '+%Y-%m-%d %H:%M:%S') UU-GUARD: $*" >>"$LOG"
+              rotate_log
+          }
+
+          uu_enabled()
+          {
+              ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
+              [ -n "$ENABLED" ] || ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+              [ "$ENABLED" = '1' ]
+          }
+
+          uu_pid()
+          {
+              ps w 2>/dev/null \
+                | grep '/var/tmp/uu/uuplugin /var/tmp/uu/uu.conf' \
+                | grep -v grep \
+                | awk 'NR==1 {print $1}'
+          }
+
+          uu_healthy()
+          {
+              [ -n "$(uu_pid)" ]
+          }
+
+          wait_default_route()
+          {
+              i=0
+              while [ "$i" -lt 45 ]; do
+                  ip route 2>/dev/null | grep -q '^default ' && return 0
+                  sleep 1
+                  i=$((i + 1))
+              done
+              return 1
+          }
+
+          restart_uu()
+          {
+              TMP="/tmp/doornet2-uu-restart.$$"
+              RC=0
+              /etc/init.d/uuplugin restart >"$TMP" 2>&1 || RC=$?
+
+              # Harmless when procd has no previous uuplugin service instance.
+              grep -Fv 'Command failed: ubus call service delete { "name": "uuplugin" } (Not found)' \
+                "$TMP" >>"$LOG" 2>/dev/null || true
+              rm -f "$TMP"
+              return "$RC"
+          }
+
+          show_status()
+          {
+              ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
+              [ -n "$ENABLED" ] || ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
+              PID="$(uu_pid)"
+              VERSION=''
+              if [ -x /var/tmp/uu/uuplugin ]; then
+                  VERSION="$(/var/tmp/uu/uuplugin -v 2>/dev/null | awk -F 'version:' '/version:/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+              fi
+
+              echo "enabled=${ENABLED:-0}"
+              if [ -n "$PID" ]; then
+                  echo "runtime=running"
+                  echo "pid=$PID"
+              else
+                  echo "runtime=stopped"
+                  echo "pid="
+              fi
+              echo "version=${VERSION:-unknown}"
+          }
+
+          repair()
+          {
+              SOURCE="${1:-manual}"
+              log_msg "repair requested source=$SOURCE"
+
+              if ! uu_enabled; then
+                  log_msg "UU disabled; skip automatic start"
+                  return 0
+              fi
+
+              if uu_healthy; then
+                  log_msg "UU already healthy; skip restart"
+                  return 0
+              fi
+
+              if ! wait_default_route; then
+                  log_msg "default route not ready; defer repair"
+                  return 2
+              fi
+
+              sleep 5
+              ATTEMPT=1
+              for WAIT in 12 20 30; do
+                  log_msg "restart attempt $ATTEMPT"
+                  restart_uu || true
+                  sleep "$WAIT"
+                  if uu_healthy; then
+                      log_msg "UU runtime running"
+                      return 0
+                  fi
+                  ATTEMPT=$((ATTEMPT + 1))
+              done
+
+              log_msg "UU runtime not running after retries"
+              return 1
+          }
+
+          force_restart()
+          {
+              SOURCE="${1:-manual}"
+              log_msg "forced restart requested source=$SOURCE"
+
+              if ! uu_enabled; then
+                  log_msg "UU disabled; skip restart"
+                  return 0
+              fi
+
+              if ! wait_default_route; then
+                  log_msg "default route not ready; defer restart"
+                  return 2
+              fi
+
+              sleep 5
+              restart_uu || true
+              sleep 12
+              if uu_healthy; then
+                  log_msg "UU runtime running"
+                  return 0
+              fi
+
+              repair "$SOURCE"
+          }
+
+          case "${1:-status}" in
+              status)
+                  show_status
+                  ;;
+              repair)
+                  repair "${2:-manual}"
+                  ;;
+              restart)
+                  force_restart "${2:-manual}"
+                  ;;
+              *)
+                  echo "usage: $0 {status|repair|restart} [source]" >&2
+                  exit 2
+                  ;;
+          esac
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-uu
+          sh -n files/usr/bin/doornet2-uu
+
           cat > files/etc/init.d/uu-delay <<'EOF'
           #!/bin/sh /etc/rc.common
 
           START=99
           STOP=15
 
-          LOG="/tmp/uu-delay.log"
-
           start()
           {
-              (
-                  echo "$(date '+%Y-%m-%d %H:%M:%S') R4 UU guard starting" >"$LOG"
-
-                  ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
-                  [ -n "$ENABLED" ] || ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
-
-                  if [ -n "$ENABLED" ]; then
-                      uci -q set uuplugin.@uuplugin[0].enable="$ENABLED"
-                      uci -q delete uuplugin.@uuplugin[0].enabled
-                      uci -q commit uuplugin
-                  fi
-                  if [ "$ENABLED" != "1" ]; then
-                      echo "$(date '+%Y-%m-%d %H:%M:%S') UU disabled; no restart needed" >>"$LOG"
-                      exit 0
-                  fi
-
-                  i=0
-                  while [ "$i" -lt 45 ]; do
-                      if ip route 2>/dev/null | grep -q '^default '; then
-                          echo "$(date '+%Y-%m-%d %H:%M:%S') default route ready" >>"$LOG"
-                          break
-                      fi
-                      sleep 1
-                      i=$((i + 1))
-                  done
-
-                  # Give DNS/NTP a short window after the route appears.
-                  sleep 5
-
-                  attempt=1
-                  while [ "$attempt" -le 3 ]; do
-                      echo "$(date '+%Y-%m-%d %H:%M:%S') restarting UU, attempt $attempt" >>"$LOG"
-
-                      /etc/init.d/uuplugin restart >>"$LOG" 2>&1 || true
-                      sleep 12
-
-                      if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin ' | grep -v grep >/dev/null 2>&1; then
-                          echo "$(date '+%Y-%m-%d %H:%M:%S') UU runtime running" >>"$LOG"
-                          exit 0
-                      fi
-
-                      attempt=$((attempt + 1))
-                  done
-
-                  echo "$(date '+%Y-%m-%d %H:%M:%S') UU runtime not running after retries" >>"$LOG"
-              ) &
+              /usr/bin/doornet2-uu repair boot >/dev/null 2>&1 &
           }
 
           stop()
@@ -1776,7 +2099,7 @@ jobs:
           echo "===== RELEASE ====="
           if [ -r /etc/doornet2_release ]; then
               grep -E \
-                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IP_POLICY|UU_RUNTIME|PERSISTENCE|WAN_POLICY|SELFHEAL)=" \
+                "^DOORNET2_(VERSION|RELEASE|TAG|BOARD|BOOT_MODE|UPDATER|TF_CAPACITY|UI|PASSWALL|NETWORK_APPS|SHUNT|DNS_CHAIN|PASSWALL_DELAY|UU_DELAY|HEALTH|IP_POLICY|UU_RUNTIME|PERSISTENCE|WAN_POLICY|SELFHEAL|DNS_POSTPASSWALL|SMARTDNS_OPENAI|UU_GUARD)=" \
                 /etc/doornet2_release 2>/dev/null || true
           else
               warn "/etc/doornet2_release missing"
@@ -1831,7 +2154,7 @@ jobs:
           info "dnsmasq.server=${DNSMASQ_SERVER:-default}"
           info "dnsmasq.noresolv=${DNSMASQ_NORESOLV:-default}"
 
-          netstat -lnptu 2>/dev/null | grep -E ':53 |:3000|:3053|:6053' || true
+          netstat -lnptu 2>/dev/null | grep -E ':53 |:3000|:3053|:6053|:15353' || true
 
           if netstat -lnptu 2>/dev/null | grep -q ':6053 '; then
               ok "SmartDNS :6053 listening"
@@ -1860,10 +2183,10 @@ jobs:
           info "tcp_node=${PW_NODE:-none}"
           info "dns_redirect=${PW_DNS_REDIRECT:-unset}"
 
-          if ps w 2>/dev/null | grep '[x]ray' >/dev/null 2>&1; then
-              ok "Xray process running"
+          if ps w 2>/dev/null | grep -Eq '[x]ray|[s]ing-box'; then
+              ok "PassWall proxy core running"
           else
-              info "Xray not running"
+              info "PassWall proxy core not running"
           fi
 
           netstat -lntp 2>/dev/null | grep -E ':1080|:1081' || true
@@ -2018,29 +2341,31 @@ jobs:
               fi
           fi
 
-          if [ "$(uci -q get passwall.@global[0].enabled)" = "1" ]; then
-              if ps w 2>/dev/null | grep '[x]ray' >/dev/null 2>&1; then
+          PW_ENABLED="$(uci -q get passwall.@global[0].enabled)"
+          PW_SOCKS_ENABLED="$(uci -q get passwall.@global[0].socks_enabled)"
+          if [ "$PW_ENABLED" = "1" ] || [ "$PW_SOCKS_ENABLED" = "1" ]; then
+              if ps w 2>/dev/null | grep -Eq '[x]ray|[s]ing-box'; then
                   clear_fail passwall
               elif second_fail passwall; then
-                  log_msg "repair PassWall/Xray"
+                  log_msg "repair PassWall proxy core"
                   /etc/init.d/passwall restart >>"$LOG" 2>&1 || true
                   clear_fail passwall
               else
-                  log_msg "PassWall miss 1/2"
+                  log_msg "PassWall proxy core miss 1/2"
               fi
           fi
 
           UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enable)"
           [ -n "$UU_ENABLED" ] || UU_ENABLED="$(uci -q get uuplugin.@uuplugin[0].enabled)"
           if [ "$UU_ENABLED" = "1" ]; then
-              if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin ' | grep -v grep >/dev/null 2>&1; then
+              if ps w 2>/dev/null | grep '/var/tmp/uu/uuplugin /var/tmp/uu/uu.conf' | grep -v grep >/dev/null 2>&1; then
                   clear_fail uu
               elif second_fail uu; then
                   log_msg "repair UU runtime"
-                  /etc/init.d/uuplugin restart >>"$LOG" 2>&1 || true
+                  /usr/bin/doornet2-uu repair selfheal >>"$LOG" 2>&1 || true
                   clear_fail uu
               else
-                  log_msg "UU miss 1/2"
+                  log_msg "UU runtime miss 1/2"
               fi
           fi
 
@@ -2084,6 +2409,7 @@ jobs:
 
           echo "===== R4 FINAL HELPERS ====="
           test -x files/etc/init.d/uu-delay
+          test -x files/usr/bin/doornet2-uu
           test -x files/etc/init.d/doornet2-selfheal
           test -x files/etc/uci-defaults/94-doornet2-final-helpers
           test -x files/usr/bin/doornet2-health
@@ -2555,21 +2881,24 @@ jobs:
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
           DOORNET2_UI='slim-source-argon-1.8.1-extracted-with-bootstrap-fallback-v1'
           DOORNET2_PASSWALL='builtin-online-feed-shunt-v2'
-          DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-generic-online-v5'
-          DOORNET2_SHUNT='preset-rules-tencent-direct-login-safe-v4'
-          DOORNET2_DNS_CHAIN='adguard-smartdns-persistent-auto-v2'
+          DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-guard2-online-v6'
+          DOORNET2_SHUNT='preset-rules-tencent-direct-login-safe-v5'
+          DOORNET2_DNS_CHAIN='adguard-smartdns-postpasswall-v3'
           DOORNET2_PASSWALL_DELAY='route-aware-proxy-aware-v2'
-          DOORNET2_UU_DELAY='route-aware-retry-field-migrate-v2'
-          DOORNET2_HEALTH='selfcheck-selfheal-v2'
-          DOORNET2_FINAL_PROFILE='stable-final-v5.3.2-dualstack-proxyv4-slim-argon181'
+          DOORNET2_UU_DELAY='guard2-route-aware-v3'
+          DOORNET2_HEALTH='selfcheck-selfheal-v3'
+          DOORNET2_FINAL_PROFILE='stable-final-v5.3.3-solidified-dualstack-proxyv4-slim-argon181'
           DOORNET2_RUNTIME_MONITOR='cpu-temp-status-only-v1'
           DOORNET2_IP_POLICY='domestic-dualstack-proxy-ipv4only-v1'
-          DOORNET2_UU_RUNTIME='openwrt-aarch64-console-only-v1'
+          DOORNET2_UU_RUNTIME='openwrt-aarch64-three-field-verified-v2'
           DOORNET2_PERSISTENCE='sysupgrade-explicit-adguard-v2'
           DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'
-          DOORNET2_SELFHEAL='service-aware-two-strike-v1'
+          DOORNET2_SELFHEAL='service-aware-two-strike-v2'
           DOORNET2_ROOT_AUTH='preserve-user-password-no-known-default-v1'
           DOORNET2_UU_FALLBACK='generic-only-no-h3c-v1'
+          DOORNET2_DNS_POSTPASSWALL='main-dns-guard-v1'
+          DOORNET2_SMARTDNS_OPENAI='proxytest-ipv4only-reboot-validated-v1'
+          DOORNET2_UU_GUARD='guard2-three-attempt-v1'
           EOF
 
           cat files/etc/doornet2_release
@@ -5487,7 +5816,7 @@ jobs:
           CONFIG_PACKAGE_luci-app-quickstart=y
           CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
 
-          # V5.3.2 UI:
+          # V5.3.3 UI:
           # Lua-compatible Argon is default; Bootstrap stays as fallback.
           # QuickStart is installed above as an optional app, not as homepage.
           CONFIG_PACKAGE_luci-theme-bootstrap=y
@@ -5673,6 +6002,12 @@ jobs:
 
           test -x files/etc/init.d/uu-delay
           sh -n files/etc/init.d/uu-delay
+          test -x files/usr/bin/doornet2-uu
+          sh -n files/usr/bin/doornet2-uu
+          test -x files/usr/bin/doornet2-dns-postpasswall
+          sh -n files/usr/bin/doornet2-dns-postpasswall
+          test -x files/usr/bin/doornet2-heal
+          sh -n files/usr/bin/doornet2-heal
           test -x files/etc/uci-defaults/94-doornet2-final-helpers
           sh -n files/etc/uci-defaults/94-doornet2-final-helpers
           test -x files/usr/bin/doornet2-health
@@ -5697,7 +6032,7 @@ jobs:
             files/etc/uci-defaults/96-doornet2-passwall-shunt
 
           echo
-          echo "===== V5.3.2 DUALSTACK + PROXY IPv4 + ARGON PACKAGES ====="
+          echo "===== V5.3.3 DUALSTACK + PROXY IPv4 + ARGON PACKAGES ====="
 
           grep -E \
             '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap)=y$' \
@@ -5715,6 +6050,74 @@ jobs:
           grep -q "mediaurlbase='/luci-static/argon'" \
             files/etc/uci-defaults/95-doornet2-ui
           test ! -e files/etc/config/design
+
+
+      - name: V5.3.3 solidified precompile source guards
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== V5.3.3 SOURCE GUARDS ====="
+
+          for f in \
+            files/etc/init.d/doornet2-dns-chain \
+            files/etc/init.d/passwall-delay \
+            files/etc/init.d/uu-delay \
+            files/etc/init.d/doornet2-selfheal \
+            files/usr/bin/doornet2-dns-postpasswall \
+            files/usr/bin/doornet2-uu \
+            files/usr/bin/doornet2-heal \
+            files/usr/bin/doornet2-selfheal-loop
+          do
+              test -x "$f"
+              sh -n "$f"
+          done
+
+          test -f files/etc/smartdns/custom.conf
+          grep -Fxq 'server-tcp 1.1.1.1:53 -group proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'server-tcp 8.8.8.8:53 -group proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /openai.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /openai.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /openai.com.cdn.cloudflare.net/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /openai.com.cdn.cloudflare.net/#6' files/etc/smartdns/custom.conf
+
+          grep -q "add_list dhcp.@dnsmasq\\[0\\].server='127.0.0.1#3053'" \
+            files/etc/init.d/doornet2-dns-chain
+          grep -q "noresolv='1'" files/etc/init.d/doornet2-dns-chain
+
+          grep -q 'PassWall proxy core miss 1/2' files/usr/bin/doornet2-heal
+          grep -q '/usr/bin/doornet2-uu repair selfheal' files/usr/bin/doornet2-heal
+          grep -q "grep -Eq '\\[x\\]ray|\\[s\\]ing-box'" files/usr/bin/doornet2-heal
+
+          grep -q '/usr/bin/doornet2-uu repair boot' files/etc/init.d/uu-delay
+          grep -q 'UU already healthy; skip restart' files/usr/bin/doornet2-uu
+
+          if grep -R -nF 'root@DoorNet2:' \
+               files/etc/init.d files/etc/uci-defaults files/usr/bin 2>/dev/null; then
+              echo "ERROR: copied shell prompt found in firmware source"
+              exit 1
+          fi
+
+          if grep -R -nF -- '-ash:' \
+               files/etc/init.d files/etc/uci-defaults files/usr/bin 2>/dev/null; then
+              echo "ERROR: copied shell diagnostic found in firmware source"
+              exit 1
+          fi
+
+          if grep -R -nE '\\[https?://' \
+               files/etc/init.d files/etc/uci-defaults files/usr/bin 2>/dev/null; then
+              echo "ERROR: Markdown-wrapped URL found in shell source"
+              exit 1
+          fi
+
+          if [ -d files/tmp/dnsmasq.d ] && \
+             find files/tmp/dnsmasq.d -type f -print -quit | grep -q .; then
+              echo "ERROR: firmware overlay must not contain /tmp/dnsmasq.d backup/test files"
+              find files/tmp/dnsmasq.d -type f -print
+              exit 1
+          fi
+
+          echo "V5.3.3 solidified source guards: PASS"
 
 
       # ============================================================
@@ -5823,6 +6226,47 @@ jobs:
 
           grep -Eq '^START=19$' "$PASSWALL_INIT_SRC"
 
+          echo "===== INSTALL DOORNET2 POST-PASSWALL DNS HOOK ====="
+          python3 - "$PASSWALL_INIT_SRC" <<'PY_PASSWALL_HOOK'
+          from pathlib import Path
+          import re, sys
+
+          p = Path(sys.argv[1])
+          text = p.read_text()
+
+          # Remove an older copy first so rerunning a job remains idempotent.
+          text = re.sub(
+              r'(?m)^[ \t]*# DOORNET2_DNS_POSTPASSWALL\n'
+              r'[ \t]*\[ -x /usr/bin/doornet2-dns-postpasswall \] && '
+              r'/usr/bin/doornet2-dns-postpasswall\n?',
+              '',
+              text,
+          )
+
+          pattern = re.compile(r'(?m)^(?P<i>[ \t]*)\$APP_FILE start[ \t]*$')
+          matches = list(pattern.finditer(text))
+          if len(matches) != 2:
+              raise SystemExit(
+                  f"ERROR: expected exactly two '$APP_FILE start' lines, found {len(matches)}"
+              )
+
+          def repl(m):
+              i = m.group("i")
+              return (
+                  f"{i}$APP_FILE start\n"
+                  f"{i}# DOORNET2_DNS_POSTPASSWALL\n"
+                  f"{i}[ -x /usr/bin/doornet2-dns-postpasswall ] && "
+                  f"/usr/bin/doornet2-dns-postpasswall"
+              )
+
+          text = pattern.sub(repl, text)
+          p.write_text(text)
+          PY_PASSWALL_HOOK
+
+          sh -n "$PASSWALL_INIT_SRC"
+          test "$(grep -c 'DOORNET2_DNS_POSTPASSWALL' "$PASSWALL_INIT_SRC")" -eq 2
+          test -x files/usr/bin/doornet2-dns-postpasswall
+
 
       - name: Compile firmware
         run: |
@@ -5869,6 +6313,14 @@ jobs:
           test -f "$UU_FILE"
           grep -q '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' "$UU_FILE"
           grep -q 'uuplugin.@uuplugin\[0\].enable' "$UU_FILE"
+          grep -q 'plugin_backup_url=' "$UU_FILE"
+          grep -q '/tmp/uu.tar.gz.part' "$UU_FILE"
+          grep -q 'tar tzf /tmp/uu.tar.gz.part' "$UU_FILE"
+
+          test -x "$ROOTFS_DIR/usr/bin/doornet2-uu"
+          sh -n "$ROOTFS_DIR/usr/bin/doornet2-uu"
+          test -x "$ROOTFS_DIR/etc/init.d/uu-delay"
+          grep -q '/usr/bin/doornet2-uu repair boot' "$ROOTFS_DIR/etc/init.d/uu-delay"
 
           test -s "$ROOTFS_DIR/etc/adguardhome.yaml"
           grep -q 'port: 3053' "$ROOTFS_DIR/etc/adguardhome.yaml"
@@ -5905,10 +6357,29 @@ jobs:
           grep -q "grep -Eq '\[x\]ray|\[s\]ing-box'" "$PASSWALL_DELAY_FILE"
           grep -q 'rm -f /etc/rc.d/S99passwall' "$RC_CLEANUP_FILE"
           grep -q 'rm -f /etc/rc.d/S19passwall-delay' "$RC_CLEANUP_FILE"
+          grep -q '/etc/init.d/uuplugin disable' "$RC_CLEANUP_FILE"
+
+          DNS_POST="$ROOTFS_DIR/usr/bin/doornet2-dns-postpasswall"
+          test -x "$DNS_POST"
+          sh -n "$DNS_POST"
+          test "$(grep -c 'DOORNET2_DNS_POSTPASSWALL' "$PASSWALL_INIT_FILE")" -eq 2
+          grep -q '/usr/bin/doornet2-dns-postpasswall' "$PASSWALL_INIT_FILE"
+
+          SMARTDNS_CUSTOM="$ROOTFS_DIR/etc/smartdns/custom.conf"
+          test -f "$SMARTDNS_CUSTOM"
+          grep -Fxq 'nameserver /openai.com/proxy-test' "$SMARTDNS_CUSTOM"
+          grep -Fxq 'address /openai.com/#6' "$SMARTDNS_CUSTOM"
+          grep -Fxq 'nameserver /openai.com.cdn.cloudflare.net/proxy-test' "$SMARTDNS_CUSTOM"
+
+          HEAL_FILE="$ROOTFS_DIR/usr/bin/doornet2-heal"
+          test -x "$HEAL_FILE"
+          grep -q '/usr/bin/doornet2-uu repair selfheal' "$HEAL_FILE"
+          grep -q 'PassWall proxy core miss 1/2' "$HEAL_FILE"
 
           SHUNT_FILE="$ROOTFS_DIR/etc/uci-defaults/96-doornet2-passwall-shunt"
           test -f "$SHUNT_FILE"
           grep -q 'DN_TencentDirect' "$SHUNT_FILE"
+          grep -q 'domain:uurouter.gdl.netease.com' "$SHUNT_FILE"
           grep -q 'domain:qpic.cn' "$SHUNT_FILE"
           grep -q 'domain:gtimg.com' "$SHUNT_FILE"
           grep -q 'domain:qlogo.cn' "$SHUNT_FILE"
@@ -6035,22 +6506,25 @@ jobs:
             "extroot": false,
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
-            "network_apps": "passwall-smartdns-adguard-persist-uu-generic-online-v5",
+            "network_apps": "passwall-smartdns-adguard-persist-uu-guard2-online-v6",
             "ui": "slim-source-argon-1.8.1-extracted-with-bootstrap-fallback-v1",
             "runtime_monitor": "cpu-temp-status-only-v1",
             "ip_policy": "domestic-dualstack-proxy-ipv4only-v1",
-            "uu_runtime": "openwrt-aarch64-console-only-v1",
+            "uu_runtime": "openwrt-aarch64-three-field-verified-v2",
             "persistence": "sysupgrade-explicit-adguard-v2",
             "wan_policy": "preserve-existing-proto-and-pppoe-creds-v2",
-            "self_heal": "service-aware-two-strike-v1",
+            "self_heal": "service-aware-two-strike-v2",
             "root_auth": "preserve-user-password-no-known-default-v1",
             "uu_fallback": "generic-only-no-h3c-v1",
-            "shunt_presets": "preset-rules-tencent-direct-login-safe-v4",
-            "dns_chain": "adguard-smartdns-persistent-auto-v2",
+            "shunt_presets": "preset-rules-tencent-direct-login-safe-v5",
+            "dns_chain": "adguard-smartdns-postpasswall-v3",
             "passwall_delay": "route-aware-proxy-aware-v2",
-            "uu_delay": "route-aware-retry-field-migrate-v2",
-            "health_check": "selfcheck-selfheal-v2",
-            "profile": "stable-final-v5.3.2-dualstack-proxyv4-slim-argon181",
+            "uu_delay": "guard2-route-aware-v3",
+            "health_check": "selfcheck-selfheal-v3",
+            "dns_postpasswall": "main-dns-guard-v1",
+            "smartdns_openai": "proxytest-ipv4only-reboot-validated-v1",
+            "uu_guard": "guard2-three-attempt-v1",
+            "profile": "stable-final-v5.3.3-solidified-dualstack-proxyv4-slim-argon181",
             "release": "R4"
           }
           EOF
@@ -6109,7 +6583,7 @@ jobs:
           - Native LEDE ip6tables userspace and kmod-ip6tables support are included
           - Xray is the only built-in proxy core; optional legacy/newer cores remain disabled
 
-          R4 FINAL stability profile:
+          V5.3.3 Final Solidified stability profile:
 
           - LAN management IP remains 192.168.100.1
           - Lua-compatible Argon + normal Status/Overview are the default experience
@@ -6120,12 +6594,15 @@ jobs:
           - UU uses the modern `enable` field, is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
           - AdGuard YAML is preserved across sysupgrade; clean installs include a :3053 -> SmartDNS :6053 baseline config
           - DNS-chain helper enforces SmartDNS :6053 readiness before AdGuard :3053, then points dnsmasq at AdGuard
-          - WeChat / QQ / Tencent media domains are forced direct at high priority to keep text and photo uploads on one exit
+          - PassWall start/restart runs a DoorNet2 post-hook that removes the validated global :15353 dnsmasq bypass and restores main DNS to AdGuard :3053 only when correction is needed
+          - SmartDNS keeps the reboot-validated OpenAI/ChatGPT proxy-test rules and proxy-domain AAAA suppression; domestic/direct DNS remains dual-stack
+          - UU Guard 2.0 skips healthy runtime restarts, uses two-strike self-heal integration, and validates NetEase primary/backup downloads with MD5 + tar checks
+          - WeChat / QQ / Tencent media domains remain forced direct; no global TCP/10001, MTU/MSS or IPv6 workaround is added
           - /usr/bin/doornet2-health provides a read-only whole-system self-check
           - /usr/bin/doornet2-heal + doornet2-selfheal provide conservative two-strike service recovery
           - Domestic/direct traffic uses native IPv4 + IPv6; PassWall proxy targets filter AAAA and use IPv4 only
           - UU aarch64 runtime is pinned to NetEase openwrt-aarch64 generic mode (console-only discovery)
-          - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints
+          - PassWall forced-direct rule includes api.example.com, speedtest.net + subdomains and UU runtime endpoints, including uurouter.gdl.netease.com
           - High-priority Tencent direct rule covers WeChat, QQ, qpic/gtimg/idqqimg/qlogo and weixinbridge media traffic
           - /etc/sysupgrade.conf explicitly retains network/PassWall/UU/SmartDNS/AdGuard user configuration
           - Existing WAN protocol is preserved across retained sysupgrade; PPPoE is never replaced by the DHCP fallback
@@ -6166,6 +6643,8 @@ jobs:
           - When AdGuard is actually listening on 3053, R4 automatically wires:
             dnsmasq :53 -> AdGuard Home :3053 -> SmartDNS :6053
           - PassWall DNS redirect is disabled when this validated chain activates
+          - ChinaDNS-NG :15353 remains PassWall-internal and is never a generic main dnsmasq upstream
+          - iPhone ChatGPT login was validated after rebooting both DoorNet2 and the iPhone
 
           Online-updatable network applications:
 
@@ -6418,7 +6897,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R4 V5.3.2 DualStack + ProxyIPv4 + Argon Final build finished"
+          echo "DoorNet2 R4 V5.3.3 Final Solidified build finished"
           echo "========================================"
 
           echo
@@ -6704,7 +7183,7 @@ jobs:
           echo "===== ONLINE NETWORK APPS ====="
 
           grep -q \
-            "DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-generic-online-v5'" \
+            "DOORNET2_NETWORK_APPS='smartdns-adguard-persist-uu-guard2-online-v6'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
@@ -6780,7 +7259,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== V5.3.2 FINAL ARGON + BOOTSTRAP FALLBACK ====="
+          echo "===== V5.3.3 FINAL ARGON + BOOTSTRAP FALLBACK ====="
 
           grep -q \
             "DOORNET2_UI='slim-source-argon-1.8.1-extracted-with-bootstrap-fallback-v1'" \
@@ -6895,8 +7374,12 @@ jobs:
           grep -q '^/etc/config/uuplugin$' files/etc/sysupgrade.conf
 
           test -x files/usr/bin/doornet2-heal
+          test -x files/usr/bin/doornet2-uu
+          test -x files/usr/bin/doornet2-dns-postpasswall
           test -x files/etc/init.d/doornet2-selfheal
           sh -n files/usr/bin/doornet2-heal
+          sh -n files/usr/bin/doornet2-uu
+          sh -n files/usr/bin/doornet2-dns-postpasswall
           sh -n files/etc/init.d/doornet2-selfheal
 
           echo
@@ -6936,5 +7419,5 @@ jobs:
           grep -q 'retained credentials were found'             files/etc/uci-defaults/96-doornet2-wan
           grep -q "DOORNET2_WAN_POLICY='preserve-existing-proto-and-pppoe-creds-v2'"             files/etc/doornet2_release
 
-          echo "R4 FINAL + GENERIC UU + DOMESTIC DUAL-STACK + PROXY IPv4-ONLY + SELFHEAL + PERSISTENCE SUCCESS"
+          echo "R4 V5.3.3 FINAL SOLIDIFIED + DNS POST-HOOK + UU GUARD 2.0 + CHATGPT REGRESSION READY"
           echo "========================================"
