@@ -527,14 +527,34 @@ jobs:
           )
           text = text[:m.start()] + parse_new + text[m.end():]
 
-          dl_re = re.compile(
-              r'(?ms)^(?P<i>\s*)echo "下载\$plugin_url 到/tmp/uu\.tar\.gz"\s*\n'
-              r'.*?^(?P=i)fi\s*$'
-          )
-          m = dl_re.search(text)
-          if not m:
-              raise SystemExit("ERROR: UU download/verify block not found")
-          i = m.group("i")
+          # Replace the upstream download/check block by line structure rather
+          # than exact indentation. Upstream mixes tab-indented download lines
+          # with space-indented if/else/fi lines.
+          dl_lines = text.splitlines(keepends=True)
+          dl_start = None
+          dl_end = None
+          saw_md5_if = False
+
+          for idx, line in enumerate(dl_lines):
+              if line.strip() == 'echo "下载$plugin_url 到/tmp/uu.tar.gz"':
+                  dl_start = idx
+                  break
+
+          if dl_start is None:
+              raise SystemExit("ERROR: UU download start marker not found")
+
+          for idx in range(dl_start + 1, len(dl_lines)):
+              stripped = dl_lines[idx].strip()
+              if stripped.startswith('if [ "$download_md5"'):
+                  saw_md5_if = True
+              if saw_md5_if and stripped == "fi":
+                  dl_end = idx
+                  break
+
+          if dl_end is None:
+              raise SystemExit("ERROR: UU download verification end marker not found")
+
+          i = dl_lines[dl_start][:len(dl_lines[dl_start]) - len(dl_lines[dl_start].lstrip())]
           dl_new = f'''{i}echo "下载$plugin_url 到/tmp/uu.tar.gz.part"
           {i}rm -f /tmp/uu.tar.gz /tmp/uu.tar.gz.part
           {i}download_ok=0
@@ -565,7 +585,9 @@ jobs:
           {i}  return 1
           {i}fi
           {i}rm -f /tmp/uu.tar.gz'''
-          text = text[:m.start()] + dl_new + text[m.end():]
+          if not dl_new.endswith("\n"):
+              dl_new += "\n"
+          text = "".join(dl_lines[:dl_start]) + dl_new + "".join(dl_lines[dl_end + 1:])
 
           p.write_text(text)
           PY
