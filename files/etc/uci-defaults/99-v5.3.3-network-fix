@@ -1,0 +1,43 @@
+#!/bin/sh
+
+# V5.3.3 Network Solidify
+# ChatGPT/OpenAI access fix
+
+uci -q set dhcp.@dnsmasq[0].noresolv='1'
+
+uci -q add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+uci -q add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+
+uci -q commit dhcp
+
+
+# keep proxy dns
+
+if [ -f /etc/config/passwall ]; then
+
+uci -q set passwall.@global[0].dns_mode='tcp'
+
+uci -q commit passwall
+
+fi
+
+
+# OpenAI domain list
+
+mkdir -p /etc/dnsmasq.d
+
+cat >/etc/dnsmasq.d/openai.conf <<EOF
+
+server=/openai.com/127.0.0.1#1053
+server=/chat.openai.com/127.0.0.1#1053
+server=/ios.chat.openai.com/127.0.0.1#1053
+server=/auth.openai.com/127.0.0.1#1053
+server=/api.openai.com/127.0.0.1#1053
+
+EOF
+
+
+/etc/init.d/dnsmasq restart || true
+
+
+exit 0
