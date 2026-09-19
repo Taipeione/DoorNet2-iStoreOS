@@ -802,6 +802,11 @@ jobs:
         run: |
           set -e
 
+          # FIX4: an earlier experimental hook named 99-v5.3.3-network-fix
+          # conflicts with the validated dnsmasq -> AdGuard :3053 -> SmartDNS :6053
+          # topology. Never let that stale repository overlay enter the image.
+          rm -f files/etc/uci-defaults/99-v5.3.3-network-fix
+
           mkdir -p \
             files/etc/uci-defaults \
             files/etc/init.d \
@@ -6614,7 +6619,7 @@ jobs:
           - TF-first / eMMC-fallback boot and physical upgrade guards are retained
           - Online firmware updater, PassWall updater and network-app updater are retained
           - PassWall has a route-aware, proxy-aware delayed recovery guard; it skips redundant restart when Xray/sing-box is already running
-          - UU uses the modern `enable` field, is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
+          - UU uses the modern \`enable\` field, is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
           - AdGuard YAML is preserved across sysupgrade; clean installs include a :3053 -> SmartDNS :6053 baseline config
           - DNS-chain helper enforces SmartDNS :6053 readiness before AdGuard :3053, then points dnsmasq at AdGuard
           - PassWall start/restart runs a DoorNet2 post-hook that removes the validated global :15353 dnsmasq bypass and restores main DNS to AdGuard :3053 only when correction is needed
@@ -6636,7 +6641,7 @@ jobs:
 
           R4 built-in PassWall shunt presets (v4 login-safe):
 
-          - PassWall's stock `myshunt` / "Xray 分流：分流总节点" is removed on
+          - PassWall's stock \`myshunt\` / "Xray 分流：分流总节点" is removed on
             clean installs so LuCI shows only the DoorNet2 R4 shunt framework
           - On retained upgrades, an untouched stock myshunt is removed, while
             a user-customized legacy myshunt is preserved
@@ -7344,9 +7349,11 @@ jobs:
           echo
           echo "===== R4 FINAL SOLIDIFIED POLICY ====="
 
-          grep -Rqs \
-            '^aarch64uurl="https://router.uu.163.com/api/plugin?type=openwrt-aarch64"$' \
-            package/doornet2/luci-app-uugamebooster
+          # FIX4: UU runtime correctness is verified against the built rootfs
+          # (/etc/init.d/uuplugin) earlier in this step. Do not re-check the
+          # transient source-tree copy after packaging.
+
+          test ! -e files/etc/uci-defaults/99-v5.3.3-network-fix
 
           grep -q 'api.example.com' files/etc/uci-defaults/96-doornet2-passwall-shunt
           grep -q 'domain:speedtest.net' files/etc/uci-defaults/96-doornet2-passwall-shunt
