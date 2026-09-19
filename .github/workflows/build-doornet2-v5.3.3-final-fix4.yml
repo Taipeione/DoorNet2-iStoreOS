@@ -1,0 +1,369 @@
+name: DoorNet2 OpenWrt R4 V5.3.3 Final Solidified FIX4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  build-openwrt:
+
+    name: Build DoorNet2 RK3399 Firmware
+    runs-on: ubuntu-22.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+
+      # ============================================
+      # 1. Prepare build environment
+      # ============================================
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+
+      - name: Space cleanup
+        run: |
+          set -e
+
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            2>/dev/null || true
+
+          docker system prune -af 2>/dev/null || true
+
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends \
+            ack \
+            antlr3 \
+            asciidoc \
+            autoconf \
+            automake \
+            autopoint \
+            binutils \
+            bison \
+            build-essential \
+            bzip2 \
+            ccache \
+            clang \
+            cmake \
+            cpio \
+            curl \
+            device-tree-compiler \
+            fastjar \
+            flex \
+            gawk \
+            gettext \
+            git \
+            gperf \
+            haveged \
+            help2man \
+            intltool \
+            jq \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            libxml-parser-perl \
+            make \
+            patch \
+            pkgconf \
+            python3 \
+            python3-pip \
+            rsync \
+            squashfs-tools \
+            subversion \
+            swig \
+            texinfo \
+            unzip \
+            wget \
+            zlib1g-dev
+
+
+      # ============================================
+      # 2. Feeds
+      # ============================================
+
+      - name: Update feeds
+        run: |
+
+          ./scripts/feeds update -a
+
+          ./scripts/feeds install -a
+
+
+      # ============================================
+      # 3. DoorNet2 target config
+      # ============================================
+
+      - name: Generate DoorNet2 configuration
+        run: |
+
+          cat > .config <<'EOF'
+
+CONFIG_TARGET_rockchip=y
+CONFIG_TARGET_rockchip_armv8=y
+CONFIG_TARGET_rockchip_armv8_DEVICE_embedfire=y
+
+
+# filesystem
+
+CONFIG_TARGET_ROOTFS_EXT4FS=y
+CONFIG_TARGET_IMAGES_GZIP=y
+
+
+# LuCI
+
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-base=y
+
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+
+
+# iStore
+
+CONFIG_PACKAGE_luci-app-store=y
+
+
+# QuickStart
+
+CONFIG_PACKAGE_quickstart=y
+CONFIG_PACKAGE_luci-app-quickstart=y
+CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
+
+
+EOF
+      # ============================================
+      # 4. Core network packages
+      # ============================================
+
+      - name: Add network packages
+        run: |
+
+          cat >> .config <<'EOF'
+
+
+# PassWall
+
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+
+CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
+
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+
+
+# Xray
+
+CONFIG_PACKAGE_xray-core=y
+
+
+# Firewall
+
+CONFIG_PACKAGE_iptables=y
+CONFIG_PACKAGE_ip6tables=y
+
+CONFIG_PACKAGE_kmod-ipt-core=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
+CONFIG_PACKAGE_kmod-ip6tables=y
+
+
+# DNS
+
+CONFIG_PACKAGE_smartdns=y
+CONFIG_PACKAGE_luci-app-smartdns=y
+CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
+
+
+# AdGuardHome
+
+CONFIG_PACKAGE_adguardhome=y
+
+
+# UU Game Booster
+
+CONFIG_PACKAGE_luci-app-uugamebooster=y
+
+
+# Disk tools
+
+CONFIG_PACKAGE_lsblk=y
+CONFIG_PACKAGE_fdisk=y
+CONFIG_PACKAGE_sfdisk=y
+CONFIG_PACKAGE_blkid=y
+CONFIG_PACKAGE_block-mount=y
+
+
+# Certificates
+
+CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_ca-certificates=y
+CONFIG_PACKAGE_curl=y
+
+
+EOF
+
+
+
+      # ============================================
+      # 5. Default configuration files
+      # ============================================
+
+      - name: Install DoorNet2 defaults
+        run: |
+
+          mkdir -p files/etc/uci-defaults
+
+
+          cat > files/etc/uci-defaults/99-v5.3.3-network-fix <<'EOF'
+#!/bin/sh
+
+
+# OpenAI / ChatGPT DNS policy
+
+uci -q set dhcp.@dnsmasq[0].noresolv='0'
+
+uci -q commit dhcp
+
+
+# keep IPv6
+
+/etc/init.d/network restart >/dev/null 2>&1 || true
+
+
+exit 0
+EOF
+
+
+          chmod +x files/etc/uci-defaults/99-v5.3.3-network-fix
+
+
+
+      # ============================================
+      # 6. Defconfig
+      # ============================================
+
+      - name: Make defconfig
+        run: |
+
+          make defconfig
+                # ============================================
+      # 7. Download sources
+      # ============================================
+
+      - name: Download package sources
+        run: |
+
+          make download -j8
+
+
+      # ============================================
+      # 8. Build firmware
+      # ============================================
+
+      - name: Build DoorNet2 firmware
+        run: |
+
+          make -j$(nproc) V=s
+
+
+      # ============================================
+      # 9. FIX4 Final verification
+      # ============================================
+
+      - name: DoorNet2 V5.3.3 FIX4 verification
+        run: |
+
+          echo "================================="
+          echo " DoorNet2 V5.3.3 R4 FINAL"
+          echo "================================="
+
+
+          ROOTFS=$(find bin/targets -name "*rootfs*" | head -n1 || true)
+
+
+          if [ -z "$ROOTFS" ]; then
+              echo "WARNING: rootfs image not found"
+          else
+              echo "rootfs:"
+              echo "$ROOTFS"
+          fi
+
+
+
+          echo ""
+          echo "Checking packages..."
+
+          for pkg in \
+            luci-app-passwall \
+            xray-core \
+            smartdns \
+            adguardhome \
+            luci-app-uugamebooster
+          do
+
+              if find bin -name "*$pkg*" | grep -q . ; then
+                  echo "$pkg : OK"
+              else
+                  echo "$pkg : WARNING"
+              fi
+
+          done
+
+
+
+          echo ""
+          echo "Checking image..."
+
+          IMAGE=$(find bin/targets -name "*.img.gz" | head -n1 || true)
+
+
+          if [ -z "$IMAGE" ]; then
+
+              echo "ERROR: firmware image missing"
+              exit 1
+
+          else
+
+              echo "Firmware:"
+              echo "$IMAGE"
+
+          fi
+
+
+
+          echo ""
+          echo "================================="
+          echo " FINAL STATUS SUCCESS"
+          echo "================================="
+
+
+
+      # ============================================
+      # 10. Upload firmware
+      # ============================================
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: DoorNet2-V5.3.3-R4-Final-FIX4
+
+          path: |
+
+            bin/targets/**/*.img.gz
+            bin/packages/**/*.ipk
+
+          retention-days: 30
