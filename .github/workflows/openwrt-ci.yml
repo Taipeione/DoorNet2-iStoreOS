@@ -6258,11 +6258,12 @@ jobs:
           grep -Fxq 'nameserver /t.co/proxy-test' files/etc/smartdns/custom.conf
           grep -Fxq 'address /t.co/#6' files/etc/smartdns/custom.conf
 
-          UU_LUCI_MODEL="$(
-            find package/doornet2/luci-app-uugamebooster \
-              -type f -name 'uuplugin.lua' -print | head -n 1
-          )"
-          test -n "$UU_LUCI_MODEL"
+          UU_LUCI_MODEL="package/doornet2/luci-app-uugamebooster/luasrc/model/cbi/uuplugin.lua"
+          test -f "$UU_LUCI_MODEL"
+
+          echo "===== UU LUCI PRECOMPILE GUARD ====="
+          grep -nE 's:option\(Flag|enabled|enable' "$UU_LUCI_MODEL" || true
+
           grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_MODEL"
           if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_MODEL"; then
               echo "ERROR: source UU LuCI checkbox still uses legacy enabled field"
@@ -7105,10 +7106,11 @@ jobs:
           set -e
 
           # This diagnostic step runs even when an earlier required step fails.
-          # If the release marker was never generated, stop cleanly here so the
-          # first real failure remains visible in the job log.
-          if [ ! -s files/etc/doornet2_release ]; then
-              echo "INFO: final verification skipped because an earlier required step did not finish."
+          # The release marker is created before the world build, so it cannot
+          # prove that compilation/artifact preparation succeeded. Gate on the
+          # actual release firmware instead to avoid secondary red failures.
+          if [ ! -s ./artifact/release/DoorNet2-ext4-sysupgrade.img.gz ]; then
+              echo "INFO: final verification skipped because the release firmware artifact was not prepared."
               exit 0
           fi
 
@@ -7566,11 +7568,12 @@ jobs:
           grep -q 'uuplugin.@uuplugin\[0\].enable' files/usr/bin/doornet2-uu
           grep -q 'delete uuplugin.@uuplugin\[0\].enabled' files/etc/uci-defaults/97-doornet2-network-apps
 
-          UU_LUCI_MODEL="$(
-            find package/doornet2/luci-app-uugamebooster \
-              -type f -name 'uuplugin.lua' -print | head -n 1
-          )"
-          test -n "$UU_LUCI_MODEL"
+          UU_LUCI_MODEL="package/doornet2/luci-app-uugamebooster/luasrc/model/cbi/uuplugin.lua"
+          test -f "$UU_LUCI_MODEL"
+
+          echo "===== UU LUCI FINAL SOURCE GUARD ====="
+          grep -nE 's:option\(Flag|enabled|enable' "$UU_LUCI_MODEL" || true
+
           grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_MODEL"
           if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_MODEL"; then
               echo "ERROR: final source UU LuCI checkbox still uses legacy enabled field"
