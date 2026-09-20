@@ -450,6 +450,34 @@ jobs:
             "$TMP_UU/src/luci-app-uugamebooster" \
             package/doornet2/luci-app-uugamebooster
 
+          # DoorNet2 V5.3.3 field-validated UU LuCI checkbox fix.
+          # The backend/runtime uses the modern UCI field `enable`; make the
+          # LuCI Flag use the same key so the visible checkbox matches runtime.
+          UU_LUCI_MODEL="$(
+            find package/doornet2/luci-app-uugamebooster \
+              -type f \
+              -name 'uuplugin.lua' \
+              -print \
+            | head -n 1
+          )"
+
+          if [ -z "$UU_LUCI_MODEL" ] || [ ! -f "$UU_LUCI_MODEL" ]; then
+              echo "ERROR: UU LuCI model uuplugin.lua not found"
+              exit 1
+          fi
+
+          sed -i -E \
+            's/(Flag,[[:space:]]*)"enabled"/\1"enable"/g' \
+            "$UU_LUCI_MODEL"
+
+          grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_MODEL"
+          if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_MODEL"; then
+              echo "ERROR: legacy UU LuCI Flag enabled field remains: $UU_LUCI_MODEL"
+              exit 1
+          fi
+
+          echo "UU LuCI checkbox field verified: $UU_LUCI_MODEL"
+
           # DoorNet2 RK3399 is aarch64. Force NetEase's generic OpenWrt
           # runtime instead of the H3C NX30 Pro compatibility runtime.
           # The generic runtime is the version validated on R4: the UU app
@@ -831,6 +859,18 @@ jobs:
           address /openaimerge.com/#6
           nameserver /openai.com.cdn.cloudflare.net/proxy-test
           address /openai.com.cdn.cloudflare.net/#6
+
+          # X/Twitter parent domains: field-validated IPv4-only proxy DNS.
+          # Do not globally alter Cloudflare/Fastly; only the X/Twitter domains
+          # validated on the live V5.3.2 system are included here.
+          nameserver /x.com/proxy-test
+          address /x.com/#6
+          nameserver /twitter.com/proxy-test
+          address /twitter.com/#6
+          nameserver /twimg.com/proxy-test
+          address /twimg.com/#6
+          nameserver /t.co/proxy-test
+          address /t.co/#6
           EOF
 
           cat > files/etc/uci-defaults/93-doornet2-dualstack-proxyv4 <<'EOF'
@@ -1205,7 +1245,15 @@ jobs:
               'address /oaiusercontent.com/#6' \
               'address /openaimerge.com/#6' \
               'nameserver /openai.com.cdn.cloudflare.net/proxy-test' \
-              'address /openai.com.cdn.cloudflare.net/#6'
+              'address /openai.com.cdn.cloudflare.net/#6' \
+              'nameserver /x.com/proxy-test' \
+              'address /x.com/#6' \
+              'nameserver /twitter.com/proxy-test' \
+              'address /twitter.com/#6' \
+              'nameserver /twimg.com/proxy-test' \
+              'address /twimg.com/#6' \
+              'nameserver /t.co/proxy-test' \
+              'address /t.co/#6'
           do
               grep -Fxq "$RULE" "$SMARTDNS_CUSTOM" || echo "$RULE" >>"$SMARTDNS_CUSTOM"
           done
@@ -6108,6 +6156,25 @@ jobs:
           grep -Fxq 'address /openai.com/#6' files/etc/smartdns/custom.conf
           grep -Fxq 'nameserver /openai.com.cdn.cloudflare.net/proxy-test' files/etc/smartdns/custom.conf
           grep -Fxq 'address /openai.com.cdn.cloudflare.net/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /x.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /x.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /twitter.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /twitter.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /twimg.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /twimg.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /t.co/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /t.co/#6' files/etc/smartdns/custom.conf
+
+          UU_LUCI_MODEL="$(
+            find package/doornet2/luci-app-uugamebooster \
+              -type f -name 'uuplugin.lua' -print | head -n 1
+          )"
+          test -n "$UU_LUCI_MODEL"
+          grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_MODEL"
+          if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_MODEL"; then
+              echo "ERROR: source UU LuCI checkbox still uses legacy enabled field"
+              exit 1
+          fi
 
           grep -q "add_list dhcp.@dnsmasq\\[0\\].server='127.0.0.1#3053'" \
             files/etc/init.d/doornet2-dns-chain
@@ -6344,6 +6411,25 @@ jobs:
           grep -q 'plugin_backup_url=' "$UU_FILE"
           grep -q '/tmp/uu.tar.gz.part' "$UU_FILE"
           grep -q 'tar tzf /tmp/uu.tar.gz.part' "$UU_FILE"
+
+          UU_LUCI_FILE="$ROOTFS_DIR/usr/lib/lua/luci/model/cbi/uuplugin.lua"
+          test -f "$UU_LUCI_FILE"
+          grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_FILE"
+          if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_FILE"; then
+              echo "ERROR: built rootfs UU LuCI checkbox still uses legacy enabled field"
+              exit 1
+          fi
+
+          SMARTDNS_CUSTOM_FILE="$ROOTFS_DIR/etc/smartdns/custom.conf"
+          test -f "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'nameserver /x.com/proxy-test' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'address /x.com/#6' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'nameserver /twitter.com/proxy-test' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'address /twitter.com/#6' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'nameserver /twimg.com/proxy-test' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'address /twimg.com/#6' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'nameserver /t.co/proxy-test' "$SMARTDNS_CUSTOM_FILE"
+          grep -Fxq 'address /t.co/#6' "$SMARTDNS_CUSTOM_FILE"
 
           test -x "$ROOTFS_DIR/usr/bin/doornet2-uu"
           sh -n "$ROOTFS_DIR/usr/bin/doornet2-uu"
@@ -6619,7 +6705,8 @@ jobs:
           - TF-first / eMMC-fallback boot and physical upgrade guards are retained
           - Online firmware updater, PassWall updater and network-app updater are retained
           - PassWall has a route-aware, proxy-aware delayed recovery guard; it skips redundant restart when Xray/sing-box is already running
-          - UU uses the modern \`enable\` field, is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
+          - UU uses the modern \`enable\` field end-to-end (including the LuCI checkbox), is enabled in the DoorNet2 profile, and has a route-aware 3-attempt restart guard
+          - X/Twitter parent domains (x.com/twitter.com/twimg.com/t.co) use proxy-test IPv4-only DNS while domestic/direct DNS remains dual-stack
           - AdGuard YAML is preserved across sysupgrade; clean installs include a :3053 -> SmartDNS :6053 baseline config
           - DNS-chain helper enforces SmartDNS :6053 readiness before AdGuard :3053, then points dnsmasq at AdGuard
           - PassWall start/restart runs a DoorNet2 post-hook that removes the validated global :15353 dnsmasq bypass and restores main DNS to AdGuard :3053 only when correction is needed
@@ -7377,6 +7464,26 @@ jobs:
           grep -q '/usr/bin/doornet2-uu repair boot' files/etc/init.d/uu-delay
           grep -q 'uuplugin.@uuplugin\[0\].enable' files/usr/bin/doornet2-uu
           grep -q 'delete uuplugin.@uuplugin\[0\].enabled' files/etc/uci-defaults/97-doornet2-network-apps
+
+          UU_LUCI_MODEL="$(
+            find package/doornet2/luci-app-uugamebooster \
+              -type f -name 'uuplugin.lua' -print | head -n 1
+          )"
+          test -n "$UU_LUCI_MODEL"
+          grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_MODEL"
+          if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_MODEL"; then
+              echo "ERROR: final source UU LuCI checkbox still uses legacy enabled field"
+              exit 1
+          fi
+
+          grep -Fxq 'nameserver /x.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /x.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /twitter.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /twitter.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /twimg.com/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /twimg.com/#6' files/etc/smartdns/custom.conf
+          grep -Fxq 'nameserver /t.co/proxy-test' files/etc/smartdns/custom.conf
+          grep -Fxq 'address /t.co/#6' files/etc/smartdns/custom.conf
 
           test -x files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
           sh -n files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
