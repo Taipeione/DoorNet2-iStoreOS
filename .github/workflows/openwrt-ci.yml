@@ -7373,7 +7373,9 @@ jobs:
           grep -B2 -A2 'name: anti-AD' files/etc/adguardhome.yaml | grep -q 'enabled: false'
           grep -A2 'name: anti-AD' files/etc/adguardhome.yaml | grep -q 'id: 900001'
 
-          grep -q 'uuplugin.@uuplugin\[0\].enable' files/etc/init.d/uu-delay
+          # UU Guard 2.0 final verification: uu-delay is only the boot wrapper.
+          grep -q '/usr/bin/doornet2-uu repair boot' files/etc/init.d/uu-delay
+          grep -q 'uuplugin.@uuplugin\[0\].enable' files/usr/bin/doornet2-uu
           grep -q 'delete uuplugin.@uuplugin\[0\].enabled' files/etc/uci-defaults/97-doornet2-network-apps
 
           test -x files/etc/uci-defaults/93-doornet2-dualstack-proxyv4
