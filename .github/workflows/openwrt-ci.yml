@@ -439,15 +439,63 @@ jobs:
           mkdir -p package/doornet2
 
           TMP_UU="$(mktemp -d)"
-          git clone \
-            --depth 1 \
-            https://github.com/lmq8267/luci-app-uugamebooster.git \
-            "$TMP_UU/src"
+          UU_REPO="https://github.com/lmq8267/luci-app-uugamebooster.git"
+          UU_CLONE_OK=0
 
-          test -f "$TMP_UU/src/luci-app-uugamebooster/Makefile"
+          # GitHub hosted runners can occasionally hit transient checkout errors.
+          # Retry this small source checkout and show enough diagnostics to tell
+          # a transport failure from an upstream repository layout change.
+          for ATTEMPT in 1 2 3; do
+              rm -rf "$TMP_UU/src"
+              echo "UU source clone attempt ${ATTEMPT}/3"
+
+              if git clone \
+                  --depth 1 \
+                  --branch master \
+                  "$UU_REPO" \
+                  "$TMP_UU/src"
+              then
+                  UU_CLONE_OK=1
+                  break
+              fi
+
+              echo "WARN: UU source clone attempt ${ATTEMPT} failed"
+              sleep $((ATTEMPT * 5))
+          done
+
+          if [ "$UU_CLONE_OK" != "1" ]; then
+              echo "ERROR: unable to clone UU source after 3 attempts"
+              exit 1
+          fi
+
+          echo "UU source commit: $(git -C "$TMP_UU/src" rev-parse --short=12 HEAD)"
+
+          # Upstream currently stores the actual OpenWrt package in a nested
+          # luci-app-uugamebooster directory. Accept a root-level package too
+          # so a harmless upstream layout change does not break DoorNet2.
+          UU_SRC=""
+          for CANDIDATE in \
+              "$TMP_UU/src/luci-app-uugamebooster" \
+              "$TMP_UU/src"
+          do
+              if [ -f "$CANDIDATE/Makefile" ] && \
+                 grep -q 'PKG_NAME:=luci-app-uugamebooster' "$CANDIDATE/Makefile"
+              then
+                  UU_SRC="$CANDIDATE"
+                  break
+              fi
+          done
+
+          if [ -z "$UU_SRC" ]; then
+              echo "ERROR: UU package Makefile not found after clone"
+              find "$TMP_UU/src" -maxdepth 3 -type f -print | sort | head -120
+              exit 1
+          fi
+
+          echo "Using UU package source: $UU_SRC"
 
           cp -a \
-            "$TMP_UU/src/luci-app-uugamebooster" \
+            "$UU_SRC" \
             package/doornet2/luci-app-uugamebooster
 
           # DoorNet2 V5.3.3 field-validated UU LuCI checkbox fix.
@@ -7544,6 +7592,14 @@ jobs:
               ls -lah ./artifact/release/
           else
               echo "INFO: ./artifact/release was not prepared because an earlier required step failed."
+          fi
+
+          # This step intentionally runs with always(). If an earlier required
+          # step failed, the release marker will not exist. Stop this diagnostic
+          # step cleanly instead of adding a misleading secondary failure.
+          if [ ! -s files/etc/doornet2_release ]; then
+              echo "INFO: files/etc/doornet2_release is absent because an earlier required step did not finish."
+              exit 0
           fi
 
 
