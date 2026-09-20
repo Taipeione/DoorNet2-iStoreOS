@@ -1,0 +1,102 @@
+Package: chinadns-ng
+Version: 2025.08.09-1
+Depends: libc
+Source: feeds/passwall_packages/chinadns-ng
+SourceName: chinadns-ng
+License: AGPL-3.0-only
+LicenseFiles: LICENSE
+Section: net
+SourceDateEpoch: 1789534905
+Maintainer: sbwml <admin@cooluc.com>
+Architecture: aarch64_generic
+Installed-Size: 287138
+Filename: chinadns-ng_2025.08.09-1_aarch64_generic.ipk
+Size: 287158
+SHA256sum: 2982eab2bfaa7c47b9a788fb02709360e5b5cbc6c9de26077d6717575321f849
+Description:  ChinaDNS next generation, refactoring with epoll and ipset.
+
+Package: dns2socks
+Version: 2.1-2
+Depends: libc, libpthread
+Source: feeds/passwall_packages/dns2socks
+SourceName: dns2socks
+License: BSD-3-Clause
+Section: net
+SourceDateEpoch: 1789534905
+Maintainer: ghostmaker
+Architecture: aarch64_generic
+Installed-Size: 11260
+Filename: dns2socks_2.1-2_aarch64_generic.ipk
+Size: 11900
+SHA256sum: 61622d2b39c176fa83cffee88de1a5fd85efe407eb936109becfbc20100d0ab1
+Description:  This is a command line utility to resolve DNS requests via
+ a SOCKS tunnel like Tor or a HTTP proxy.
+
+Package: ipt2socks
+Version: 1.1.4-3
+Depends: libc, libpthread
+Source: feeds/passwall_packages/ipt2socks
+SourceName: ipt2socks
+License: AGPL-3.0
+Section: net
+SourceDateEpoch: 1789534905
+Architecture: aarch64_generic
+Installed-Size: 25987
+Filename: ipt2socks_1.1.4-3_aarch64_generic.ipk
+Size: 26578
+SHA256sum: b638e539cc70e903edcb03c6ea414294d95b9d34c83abda8ddef71e3ab3ad940
+Description:  Utility for converting iptables (redirect/tproxy) to socks5.
+
+Package: microsocks
+Version: 1.0.5-2
+Depends: libc, libpthread
+Source: feeds/passwall_packages/microsocks
+SourceName: microsocks
+License: MIT
+LicenseFiles: COPYING
+Section: net
+SourceDateEpoch: 1789534905
+Maintainer: lean
+Architecture: aarch64_generic
+Installed-Size: 8017
+Filename: microsocks_1.0.5-2_aarch64_generic.ipk
+Size: 8752
+SHA256sum: d7816624f83fee3ac5548c3895de716b528dff962d545a85b2e648eb489b80c0
+Description:  A SOCKS5 service that you can run on your remote boxes to tunnel connections
+ through them, if for some reason SSH doesn't cut it for you.
+ This version supports forwarding rules.
+
+Package: tcping
+Version: 0.3-1
+Depends: libc
+Source: feeds/passwall_packages/tcping
+SourceName: tcping
+License: GPL-2.0-only
+LicenseFiles: license.txt
+Section: net
+SourceDateEpoch: 1789534905
+Architecture: aarch64_generic
+Installed-Size: 3710
+Filename: tcping_0.3-1_aarch64_generic.ipk
+Size: 4285
+SHA256sum: 81f3f9181817ea4a3ab72906b8f77f96e3dcd2775fbd60318c240c54be412a40
+Description:  tcping measures the latency of a tcp-connection
+
+Package: xray-core
+Version: 25.1.30-1
+Depends: libc, ca-bundle
+Source: feeds/passwall_packages/xray-core
+SourceName: xray-core
+License: MPL-2.0
+LicenseFiles: LICENSE
+Section: net
+SourceDateEpoch: 1789534905
+Maintainer: Tianling Shen <cnsztl@immortalwrt.org>
+Architecture: aarch64_generic
+Installed-Size: 9862856
+Filename: xray-core_25.1.30-1_aarch64_generic.ipk
+Size: 9832006
+SHA256sum: 4f6eec951fef2953546767adf790573a7510bf7ceb25191f60b3b865e934c921
+Description:  Xray, Penetrates Everything. It helps you to build your own computer network.
+ It secures your network connections and thus protects your privacy.
+
