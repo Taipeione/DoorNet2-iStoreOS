@@ -501,28 +501,73 @@ jobs:
           # DoorNet2 V5.3.3 field-validated UU LuCI checkbox fix.
           # The backend/runtime uses the modern UCI field `enable`; make the
           # LuCI Flag use the same key so the visible checkbox matches runtime.
-          UU_LUCI_MODEL="$(
-            find package/doornet2/luci-app-uugamebooster \
-              -type f \
-              -name 'uuplugin.lua' \
-              -print \
-            | head -n 1
-          )"
+          #
+          # Upstream currently stores it at:
+          #   luasrc/model/cbi/uuplugin.lua
+          # Use the explicit path first, then a guarded fallback search.
+          UU_LUCI_MODEL="package/doornet2/luci-app-uugamebooster/luasrc/model/cbi/uuplugin.lua"
+
+          if [ ! -f "$UU_LUCI_MODEL" ]; then
+              UU_LUCI_MODEL="$(
+                find package/doornet2/luci-app-uugamebooster \
+                  -type f \
+                  -name 'uuplugin.lua' \
+                  -print \
+                | head -n 1
+              )"
+          fi
 
           if [ -z "$UU_LUCI_MODEL" ] || [ ! -f "$UU_LUCI_MODEL" ]; then
               echo "ERROR: UU LuCI model uuplugin.lua not found"
+              find package/doornet2/luci-app-uugamebooster \
+                -maxdepth 5 -type f -print | sort | head -120
               exit 1
           fi
 
-          sed -i -E \
-            's/(Flag,[[:space:]]*)"enabled"/\1"enable"/g' \
-            "$UU_LUCI_MODEL"
+          echo "UU LuCI model: $UU_LUCI_MODEL"
+          echo "UU LuCI field before patch:"
+          grep -nE 's:option\(Flag|enabled|enable' "$UU_LUCI_MODEL" || true
 
-          grep -Eq 'Flag,[[:space:]]*"enable"' "$UU_LUCI_MODEL"
-          if grep -Eq 'Flag,[[:space:]]*"enabled"' "$UU_LUCI_MODEL"; then
-              echo "ERROR: legacy UU LuCI Flag enabled field remains: $UU_LUCI_MODEL"
-              exit 1
-          fi
+          # Avoid a brittle sed-only assertion. Patch both quote styles,
+          # accept an already-correct upstream file, and print diagnostics
+          # before failing if the expected Flag cannot be found.
+          python3 - "$UU_LUCI_MODEL" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+
+          old_re = re.compile(r"(Flag\s*,\s*)([\"'])enabled\2")
+          new_re = re.compile(r"Flag\s*,\s*([\"'])enable\1")
+
+          s2, count = old_re.subn(
+              lambda m: f"{m.group(1)}{m.group(2)}enable{m.group(2)}",
+              s,
+          )
+
+          if count == 0 and not new_re.search(s):
+              print("ERROR: unable to identify UU LuCI enable Flag")
+              for n, line in enumerate(s.splitlines(), 1):
+                  if "Flag" in line or "enabled" in line or "enable" in line:
+                      print(f"{n}:{line}")
+              raise SystemExit(1)
+
+          if old_re.search(s2):
+              print("ERROR: legacy UU LuCI enabled Flag remains after patch")
+              raise SystemExit(1)
+
+          if not new_re.search(s2):
+              print("ERROR: modern UU LuCI enable Flag missing after patch")
+              raise SystemExit(1)
+
+          p.write_text(s2)
+          print(f"UU LuCI field patched/verified; replacements={count}")
+          PY
+
+          echo "UU LuCI field after patch:"
+          grep -nE 's:option\(Flag|enable' "$UU_LUCI_MODEL" || true
 
           echo "UU LuCI checkbox field verified: $UU_LUCI_MODEL"
 
@@ -7059,6 +7104,14 @@ jobs:
         run: |
           set -e
 
+          # This diagnostic step runs even when an earlier required step fails.
+          # If the release marker was never generated, stop cleanly here so the
+          # first real failure remains visible in the job log.
+          if [ ! -s files/etc/doornet2_release ]; then
+              echo "INFO: final verification skipped because an earlier required step did not finish."
+              exit 0
+          fi
+
           echo "========================================"
           echo "DoorNet2 R4 V5.3.3 Final Solidified build finished"
           echo "========================================"
@@ -7593,15 +7646,6 @@ jobs:
           else
               echo "INFO: ./artifact/release was not prepared because an earlier required step failed."
           fi
-
-          # This step intentionally runs with always(). If an earlier required
-          # step failed, the release marker will not exist. Stop this diagnostic
-          # step cleanly instead of adding a misleading secondary failure.
-          if [ ! -s files/etc/doornet2_release ]; then
-              echo "INFO: files/etc/doornet2_release is absent because an earlier required step did not finish."
-              exit 0
-          fi
-
 
           echo
           echo "========================================"
